@@ -413,6 +413,27 @@ static void scenario_settings(void)
     snapshot("settings");
 }
 
+// The Night-brightness row mid-edit — the value a bedside user most wants to
+// tune: rotor-walked down to the row, tapped into edit mode (knob now drives
+// the percent, row accented, live backlight preview on real hardware), then
+// dialed to 80% so the render shows the edit state with a deliberately chosen
+// value instead of the untouched 100% default. The Day row stays visible
+// above it at 100%, so one frame shows both rows plus the edit treatment.
+static void scenario_settings_brightness(void)
+{
+    apply_baseline();
+    ui_router_go(SCR_SETTINGS, NULL, LV_SCR_LOAD_ANIM_NONE);
+    pump_ms(300);
+    sim_knob(5);          // list opens focused past Back -> lands on Night brightness
+    pump_ms(400);
+    pump_until_idle(800); // rotor snap is an lv_anim; land before tapping
+    sim_tap(180, 180);    // focused row sits snap-centered at mid-screen
+    pump_ms(300);
+    sim_knob(-2);         // 100% -> 80%
+    pump_ms(300);
+    snapshot("settings-brightness");
+}
+
 static void scenario_wifi_info(void)
 {
     apply_baseline();
@@ -498,11 +519,12 @@ int main(void)
     scenario_tonight_relative();
     scenario_menu();
     scenario_settings();
+    scenario_settings_brightness();
     scenario_wifi_info();
     scenario_about();
     scenario_updating();
     scenario_standby();
 
-    printf("done: 19 screens rendered to %s\n", DIAL_SIM_OUTPUT_DIR);
+    printf("done: 20 screens rendered to %s\n", DIAL_SIM_OUTPUT_DIR);
     return 0;
 }

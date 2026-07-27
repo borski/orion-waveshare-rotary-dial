@@ -9,6 +9,16 @@
 
 #define NVS_NS "ui"
 
+// Shared range clamp for the two brightness prefs — used on both read
+// (defends against a corrupt/out-of-range NVS byte) and write (defends a
+// caller that didn't already clamp, e.g. a future settings-screen bug).
+static inline uint8_t clamp_bri_pct(uint8_t pct)
+{
+    if (pct < 10)  return 10;
+    if (pct > 100) return 100;
+    return pct;
+}
+
 static SemaphoreHandle_t s_mux;
 static QueueHandle_t     s_cmd_q;
 static app_state_t       s_state;
@@ -29,6 +39,8 @@ void dial_state_init(void)
     s_state.phase = PH_BOOT;
     s_state.wifi_join_idx = -1;   // no on-device join attempted yet
     s_state.haptics_enabled = true;   // matches dial_haptics.c's own default
+    s_state.bri_day_pct   = 100;      // fresh-device default == today's exact
+    s_state.bri_night_pct = 100;      // brightness (100% of the existing duty tables)
     // Fresh-device default: relative scale (owner decision). Seeded here, in
     // RAM, exactly like haptics_enabled above — restore_prefs opens NVS
     // read-only and early-returns when the "ui" namespace doesn't exist yet
@@ -47,13 +59,17 @@ void dial_state_restore_prefs(void)
     nvs_handle_t h;
     if (nvs_open(NVS_NS, NVS_READONLY, &h) != ESP_OK) return;
     uint8_t zone = 0, units = 0, haptics = 1, rot = 0, relmode = 1;
+    uint8_t bri_day = 100, bri_night = 100;
     bool have_zone    = nvs_get_u8(h, "zone", &zone) == ESP_OK && zone < ZONE_COUNT;
     bool have_units   = nvs_get_u8(h, "units", &units) == ESP_OK;
     bool have_haptics = nvs_get_u8(h, "haptics", &haptics) == ESP_OK;
     bool have_rot     = nvs_get_u8(h, "rot", &rot) == ESP_OK && rot < 4;
     bool have_rel     = nvs_get_u8(h, "relmode", &relmode) == ESP_OK;
+    bool have_bri_day   = nvs_get_u8(h, "bri_day", &bri_day) == ESP_OK;
+    bool have_bri_night = nvs_get_u8(h, "bri_night", &bri_night) == ESP_OK;
     nvs_close(h);
-    if (!have_zone && !have_units && !have_haptics && !have_rot && !have_rel) return;
+    if (!have_zone && !have_units && !have_haptics && !have_rot && !have_rel
+        && !have_bri_day && !have_bri_night) return;
 
     xSemaphoreTake(s_mux, portMAX_DELAY);
     if (have_zone) {
@@ -73,6 +89,8 @@ void dial_state_restore_prefs(void)
     // device has neither key and keeps init's relative default.
     if (have_rel)       s_state.rel_mode = (relmode != 0);
     else if (have_zone) s_state.rel_mode = false;
+    if (have_bri_day)   s_state.bri_day_pct   = clamp_bri_pct(bri_day);
+    if (have_bri_night) s_state.bri_night_pct = clamp_bri_pct(bri_night);
     s_state.generation++;
     xSemaphoreGive(s_mux);
 }
@@ -272,6 +290,58 @@ void dial_state_set_haptics_enabled(bool enabled)
     nvs_handle_t h;
     if (nvs_open(NVS_NS, NVS_READWRITE, &h) == ESP_OK) {
         nvs_set_u8(h, "haptics", enabled ? 1 : 0);
+        nvs_commit(h);
+        nvs_close(h);
+    }
+}
+
+// Cheap single-field reads (mutex held only long enough to copy one byte) —
+// dial_power's power_task calls these from its 100ms apply tick, and a full
+// dial_state_get() snapshot (the app_state_t struct is large, e.g. the 600B
+// oauth_url) would be needless work on that hot-ish loop.
+uint8_t dial_state_get_bri_day_pct(void)
+{
+    xSemaphoreTake(s_mux, portMAX_DELAY);
+    uint8_t v = s_state.bri_day_pct;
+    xSemaphoreGive(s_mux);
+    return v;
+}
+
+uint8_t dial_state_get_bri_night_pct(void)
+{
+    xSemaphoreTake(s_mux, portMAX_DELAY);
+    uint8_t v = s_state.bri_night_pct;
+    xSemaphoreGive(s_mux);
+    return v;
+}
+
+void dial_state_set_bri_day_pct(uint8_t pct)
+{
+    pct = clamp_bri_pct(pct);
+    xSemaphoreTake(s_mux, portMAX_DELAY);
+    s_state.bri_day_pct = pct;
+    s_state.generation++;
+    xSemaphoreGive(s_mux);
+
+    nvs_handle_t h;
+    if (nvs_open(NVS_NS, NVS_READWRITE, &h) == ESP_OK) {
+        nvs_set_u8(h, "bri_day", pct);
+        nvs_commit(h);
+        nvs_close(h);
+    }
+}
+
+void dial_state_set_bri_night_pct(uint8_t pct)
+{
+    pct = clamp_bri_pct(pct);
+    xSemaphoreTake(s_mux, portMAX_DELAY);
+    s_state.bri_night_pct = pct;
+    s_state.generation++;
+    xSemaphoreGive(s_mux);
+
+    nvs_handle_t h;
+    if (nvs_open(NVS_NS, NVS_READWRITE, &h) == ESP_OK) {
+        nvs_set_u8(h, "bri_night", pct);
         nvs_commit(h);
         nvs_close(h);
     }

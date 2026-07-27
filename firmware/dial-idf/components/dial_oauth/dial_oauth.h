@@ -68,6 +68,15 @@ void dial_oauth_stop_authorize(void);
 // The most recent token-endpoint error (HTTP status + body snippet), for display.
 const char *dial_oauth_last_error(void);
 
+// True if the LAST token-endpoint failure (refresh or code exchange) was
+// PERMANENT: HTTP 400/401 with an OAuth "error":"invalid_grant" body (RFC
+// 6749 §5.2) -- the refresh token is dead and will never work again. False
+// for transient failures (transport error, 408/429, 5xx, any other 4xx) and
+// whenever the last token-endpoint call succeeded. Reflects only the most
+// recent call; callers that need to debounce a one-off server fluke should
+// count consecutive permanent results themselves.
+bool dial_oauth_last_token_err_permanent(void);
+
 // The embedded PEM trust anchors for mcp.orionsleep.com, so the MCP client can
 // reuse the same verified-TLS config instead of the (broken) IDF cert bundle.
 const char *dial_oauth_root_ca(void);

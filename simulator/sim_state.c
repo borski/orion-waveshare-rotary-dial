@@ -7,8 +7,9 @@
  * screens call (verified against every scr_*.c + ui_router.c): dial_state_get,
  * set_ui_temp, set_zone_on, set_ui_zone, set_welcomed, set_side_picked,
  * set_units_c, set_haptics_enabled, set_rotation, set_wifi_join,
- * clear_wifi_join_failed, set_phase, stamp_input, and dial_cmd_post (a
- * logging no-op — there is no worker task here to drain the queue).
+ * clear_wifi_join_failed, set_phase, stamp_input, get/set_bri_day_pct,
+ * get/set_bri_night_pct, and dial_cmd_post (a logging no-op — there is no
+ * worker task here to drain the queue).
  *
  * No mutex: this whole simulator is one thread pumping the LVGL tick, so
  * "under the store mutex" collapses to "just mutate the global."
@@ -27,6 +28,8 @@ void sim_state_reset(void)
     s_state.ui_temp_f[ZONE_A] = -1;
     s_state.ui_temp_f[ZONE_B] = -1;
     s_state.wifi_join_idx = -1;
+    s_state.bri_day_pct = 100;    // matches dial_state_init's fresh-device default,
+    s_state.bri_night_pct = 100;  // so screenshots render scr_settings' new rows as "100%"
     s_state.generation = 1;
 }
 
@@ -83,6 +86,21 @@ void dial_state_set_haptics_enabled(bool enabled)
 void dial_state_set_rotation(uint8_t quarters)
 {
     s_state.rotation = quarters;
+    s_state.generation++;
+}
+
+uint8_t dial_state_get_bri_day_pct(void) { return s_state.bri_day_pct; }
+uint8_t dial_state_get_bri_night_pct(void) { return s_state.bri_night_pct; }
+
+void dial_state_set_bri_day_pct(uint8_t pct)
+{
+    s_state.bri_day_pct = pct;
+    s_state.generation++;
+}
+
+void dial_state_set_bri_night_pct(uint8_t pct)
+{
+    s_state.bri_night_pct = pct;
     s_state.generation++;
 }
 

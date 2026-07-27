@@ -1,5 +1,6 @@
 #pragma once
 #include <stdbool.h>
+#include <stdint.h>
 
 /*
  * Display power / standby manager: idle-driven backlight dimming with LEDC
@@ -33,3 +34,31 @@ bool dial_power_wake_consumes(void);
 // Night mode (bedtime window from the sleep schedule): lower duty targets
 // and a warm-dim standby. Also forwards to dial_haptics_set_night().
 void dial_power_set_night(bool night);
+
+/*
+ * User-configurable day/night brightness (10..100%, dial_state's
+ * "bri_day"/"bri_night" prefs). power_task is still the only context that
+ * ever issues an LEDC fade — it reads the current percents via the
+ * dial_state getters on every apply and scales the base DUTY_DAY/DUTY_NIGHT
+ * tables itself. Everyone else just pokes the decision, same as the rest of
+ * this file's concurrency model.
+ */
+
+// Call after a brightness pref changes (dial_state_set_bri_day_pct/
+// set_bri_night_pct already persisted it) so the new value takes effect
+// within one 100ms tick instead of waiting for an unrelated level change.
+void dial_power_brightness_changed(void);
+
+// Settings-screen live preview: while set, power_task fades to `pct` percent
+// of the requested table's ACTIVE duty instead of the normal level duty —
+// deliberately still just the active brightness regardless of the real idle
+// level, since the screen is by definition in front of the user while they're
+// dialing this in. `night` selects which base table (DAY/NIGHT) to preview;
+// previewing NIGHT during the day is intentional (the user must be able to
+// see what they're choosing). Call again on every knob detent to update the
+// live value; each call also forces a reapply so the fade starts within one
+// tick. dial_power_preview_end() clears the override (also forcing a reapply
+// back to the normal level duty) — screens MUST call it when edit mode ends,
+// including on teardown, or the override sticks forever.
+void dial_power_preview(bool night, uint8_t pct);
+void dial_power_preview_end(void);

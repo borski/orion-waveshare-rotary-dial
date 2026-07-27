@@ -313,6 +313,22 @@ static void url_decode(char *s)
 /* ---- token exchange (shared by authorize + refresh) ------------------ */
 
 static char s_token_err[192];   // last token-endpoint error, for on-screen display
+static bool s_token_err_permanent;   // see dial_oauth_last_token_err_permanent
+
+// RFC 6749 §5.2: the token endpoint reports a dead refresh token (expired,
+// revoked, or rotated out from under us) as an error body with
+// "error":"invalid_grant". That's the one condition that will never clear on
+// its own; every other failure body is either absent or a different error.
+static bool is_invalid_grant(const char *body)
+{
+    if (!body) return false;
+    cJSON *j = cJSON_Parse(body);
+    if (!j) return false;
+    char err[32] = { 0 };
+    bool bad = json_get_str(j, "error", err, sizeof(err)) && strcmp(err, "invalid_grant") == 0;
+    cJSON_Delete(j);
+    return bad;
+}
 
 static bool token_request(const char *token_endpoint, const char *body)
 {
@@ -322,9 +338,14 @@ static bool token_request(const char *token_endpoint, const char *body)
     if (st != 200 || !resp) {
         ESP_LOGE(TAG, "token HTTP %d: %s", st, resp ? resp : "(no body)");
         snprintf(s_token_err, sizeof(s_token_err), "HTTP %d\n%.150s", st, resp ? resp : "");
+        // Permanent ONLY for the RFC-defined dead-refresh-token signal (400/401
+        // + invalid_grant). Transport failures (status <= 0), 408/429, 5xx, and
+        // any other 4xx are transient -- worth retrying, not worth re-linking.
+        s_token_err_permanent = (st == 400 || st == 401) && is_invalid_grant(resp);
         free(resp);
         return false;
     }
+    s_token_err_permanent = false;   // a 200 response is never the dead-token signal
     cJSON *j = cJSON_Parse(resp);
     free(resp);
     if (!j) return false;
@@ -468,3 +489,5 @@ void dial_oauth_stop_authorize(void)
 }
 
 const char *dial_oauth_last_error(void) { return s_token_err; }
+
+bool dial_oauth_last_token_err_permanent(void) { return s_token_err_permanent; }

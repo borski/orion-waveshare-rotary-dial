@@ -236,6 +236,13 @@ typedef struct {
     // Haptics master enable, mirrored here so screens can read the current
     // setting; dial_haptics_set_enabled() is the actual enforcement point.
     bool haptics_enabled;
+    // Day/night backlight brightness, 10..100 (percent), 10% steps. dial_power
+    // scales its whole duty table (active/dimmed/standby together) by this at
+    // apply time; dial_power_start() is what actually enforces it. Defaults to
+    // 100 (today's exact brightness) both here and in NVS-absent restores —
+    // see dial_state_get_bri_day_pct/set_bri_day_pct.
+    uint8_t bri_day_pct;
+    uint8_t bri_night_pct;
 
     // --- OTA (M6) ---
     // Mirrors dial_ota_info_t (components/dial_ota/dial_ota.h) field-for-
@@ -325,6 +332,20 @@ void dial_state_set_rel_mode(bool rel_mode);
 // NOT itself call dial_haptics_set_enabled() — dial_state has no business
 // knowing about the haptics driver, so callers do both.
 void dial_state_set_haptics_enabled(bool enabled);
+
+// Day/night backlight brightness preference, 10..100 (percent, 10% steps).
+// Getters always return a value in that range (clamped on read; 100 when no
+// "bri_day"/"bri_night" NVS key has ever been written). Setters clamp too and
+// persist immediately to NVS "ui"/"bri_day" and "ui"/"bri_night" — same
+// immediate-commit pattern as dial_state_set_haptics_enabled above. dial_state
+// has no business knowing about the backlight driver, so callers that want the
+// new brightness to actually take effect must also call
+// dial_power_brightness_changed() (dial_power.h), same division of labor as
+// haptics_enabled/dial_haptics_set_enabled().
+uint8_t dial_state_get_bri_day_pct(void);
+uint8_t dial_state_get_bri_night_pct(void);
+void    dial_state_set_bri_day_pct(uint8_t pct);
+void    dial_state_set_bri_night_pct(uint8_t pct);
 
 // Screen rotation, quarter turns clockwise (0..3). Persisted; apply it to the
 // panel with dial_display_set_rotation.

@@ -19,10 +19,27 @@ static const char *TAG = "power";
 #define STANDBY_AFTER_US  (90LL * 1000000)   // 90s idle -> standby
 #define FADE_MS           400
 
-// Duty targets (8-bit). Night values keep the room dark.
+// Duty targets (8-bit). Night values keep the room dark. These are the BASE
+// tables at the user's brightness pref == 100%; the apply path below scales
+// them by dial_state's bri_day/bri_night percent (10..100) at every tick, so
+// these constants must stay exactly what a 100% preference has always meant.
 typedef struct { uint8_t active, dimmed, standby; } duty_set_t;
 static const duty_set_t DUTY_DAY   = { 255, 90, 25 };
 static const duty_set_t DUTY_NIGHT = { 140, 40, 6  };
+
+// Floors applied AFTER scaling, so a 10% preference dims a lot without ever
+// blacking the panel out or making the standby glow imperceptible.
+#define FLOOR_ACTIVE   13
+#define FLOOR_DIMMED   10
+#define FLOOR_STANDBY   4
+
+static inline uint8_t scale_duty(uint8_t base, uint8_t pct, uint8_t floor)
+{
+    uint32_t v = ((uint32_t)base * pct) / 100;
+    if (v < floor) v = floor;
+    if (v > 255)   v = 255;
+    return (uint8_t)v;
+}
 
 /*
  * Concurrency model (deliberate, after review):
@@ -39,6 +56,11 @@ static dial_power_level_t s_level = DPWR_ACTIVE;
 
 static volatile bool s_night;
 static volatile bool s_force_reapply;   // set_night flips tables mid-level
+
+// Settings-screen live preview override: -1 = none, else the exact duty to
+// fade to instead of the normal level duty. Set only from dial_power_preview
+// (LVGL task); read and applied only by power_task, same rule as s_level.
+static volatile int s_preview_duty = -1;
 
 static void fade_to(uint8_t duty)
 {
@@ -74,11 +96,23 @@ static void power_task(void *arg)
 
         if (want != applied || s_force_reapply) {
             s_force_reapply = false;
-            const duty_set_t *d = duties();
-            switch (want) {
-            case DPWR_ACTIVE:  fade_to(d->active);  break;
-            case DPWR_DIMMED:  fade_to(d->dimmed);  break;
-            case DPWR_STANDBY: fade_to(d->standby); break;
+            int preview = s_preview_duty;
+            if (preview >= 0) {
+                // Settings screen is live-previewing a candidate value —
+                // that duty wins outright, independent of the idle level.
+                fade_to((uint8_t)preview);
+            } else {
+                const duty_set_t *d = duties();
+                uint8_t pct = s_night ? dial_state_get_bri_night_pct()
+                                       : dial_state_get_bri_day_pct();
+                uint8_t duty;
+                switch (want) {
+                case DPWR_ACTIVE:  duty = scale_duty(d->active,  pct, FLOOR_ACTIVE);  break;
+                case DPWR_DIMMED:  duty = scale_duty(d->dimmed,  pct, FLOOR_DIMMED);  break;
+                case DPWR_STANDBY: duty = scale_duty(d->standby, pct, FLOOR_STANDBY); break;
+                default:           duty = d->active; break;
+                }
+                fade_to(duty);
             }
             applied = want;
         }
@@ -119,4 +153,26 @@ void dial_power_set_night(bool night)
     dial_haptics_set_night(night);
     s_force_reapply = true;   // power_task re-fades with the new duty table
     ESP_LOGI(TAG, "night mode %s", night ? "on" : "off");
+}
+
+// Called (from the LVGL task) after dial_state_set_bri_day_pct/
+// set_bri_night_pct already persisted the new preference. Just a decision
+// flip, like every other setter in this file — power_task issues the actual
+// fade on its next 100ms tick.
+void dial_power_brightness_changed(void)
+{
+    s_force_reapply = true;
+}
+
+void dial_power_preview(bool night, uint8_t pct)
+{
+    const duty_set_t *base = night ? &DUTY_NIGHT : &DUTY_DAY;
+    s_preview_duty = scale_duty(base->active, pct, FLOOR_ACTIVE);
+    s_force_reapply = true;
+}
+
+void dial_power_preview_end(void)
+{
+    s_preview_duty = -1;
+    s_force_reapply = true;
 }

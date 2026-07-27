@@ -35,6 +35,9 @@ dial_power_level_t dial_power_level(void) { return DPWR_ACTIVE; }
 bool dial_power_wake_consumes(void) { return false; }
 void dial_power_start(void) {}
 void dial_power_set_night(bool night) { (void)night; }
+void dial_power_brightness_changed(void) {}
+void dial_power_preview(bool night, uint8_t pct) { (void)night; (void)pct; }
+void dial_power_preview_end(void) {}
 
 /* ---- dial_display --------------------------------------------------------
  * Rotation always "succeeds" — the real function only fails when the 90/270
@@ -110,6 +113,6 @@ void dial_net_on_event(dial_net_event_cb_t cb) { (void)cb; }
 
 const esp_app_desc_t *esp_app_get_description(void)
 {
-    static const esp_app_desc_t desc = { .version = "1.0.7", .idf_ver = "v6.0" };
+    static const esp_app_desc_t desc = { .version = "1.0.8", .idf_ver = "v6.0" };
     return &desc;
 }

@@ -946,16 +946,37 @@ static void backoff_wait(int seconds)
     dial_state_commit(mut_retry_in, &zero);
 }
 
+// Consecutive refresh failures classified PERMANENT (dial_oauth_last_token_err_
+// permanent -- RFC 6749 §5.2 invalid_grant). Two in a row, not one, so a single
+// server-side fluke can't force a re-link; reset on any success or
+// transient-classified failure. Steady state only calls with_auth_retry every
+// ~10s (poll) or on a rare write, so two hits is at most ~20s to recover.
+static int s_perm_refresh_failures = 0;
+
 // 401-aware call wrapper: on failure, refresh the token, reopen the MCP
 // session, retry once. Used for polls AND writes so an expired token never
-// silently drops a command.
+// silently drops a command. If the refresh token itself is dead (not just
+// this call), that never clears on its own -- after two consecutive
+// permanent-classified refresh failures, forget the tokens and reboot into
+// the QR consent screen, exactly like the manual CMD_RELINK path, instead of
+// presenting the same dead token forever.
 static bool with_auth_retry(bool (*call)(void *), void *arg,
                             const oauth_disc_t *disc, const char *client_id)
 {
-    if (call(arg)) return true;
+    if (call(arg)) { s_perm_refresh_failures = 0; return true; }
     if (dial_oauth_refresh(disc, client_id)) {
+        s_perm_refresh_failures = 0;
         dial_mcp_connect(NULL);
         return call(arg);
+    }
+    if (dial_oauth_last_token_err_permanent()) {
+        if (++s_perm_refresh_failures >= 2) {
+            ESP_LOGE(TAG, "refresh token permanently rejected (x%d) — re-linking", s_perm_refresh_failures);
+            dial_oauth_forget();
+            esp_restart();
+        }
+    } else {
+        s_perm_refresh_failures = 0;   // transient -- e.g. network/5xx -- don't count it
     }
     return false;
 }
@@ -1198,12 +1219,17 @@ static void worker_task(void *arg)
             // Force one refresh and retry.
             if (dial_oauth_refresh(&disc, client_id)) {
                 linked = dial_mcp_connect(NULL) && orion_discover_device();
-            } else {
-                // The refresh token is dead too. Drop the stale access token so
-                // the next pass falls through to interactive consent (the QR)
-                // rather than spinning on credentials that can never work again.
-                ESP_LOGW(TAG, "refresh failed on a rejected token — re-linking");
+            } else if (dial_oauth_last_token_err_permanent()) {
+                // The refresh token is dead too (RFC 6749 §5.2 invalid_grant).
+                // Drop the stale access token so the next pass falls through to
+                // interactive consent (the QR) rather than spinning on
+                // credentials that can never work again.
+                ESP_LOGW(TAG, "refresh permanently rejected — re-linking");
                 dial_oauth_forget_access();
+            } else {
+                // Transient (network/5xx/etc): leave tokens alone and just fall
+                // into the same backoff/retry as any other connect failure below.
+                ESP_LOGW(TAG, "refresh failed (transient) — will retry");
             }
         }
         if (!linked) {
@@ -1476,6 +1502,10 @@ void app_main(void)
     bool fresh = !dial_net_have_creds() && !dial_net_setup_requested();
     dial_state_commit(mut_fresh_device, &fresh);
     dial_state_restore_prefs();   // last shown side + rotation (needs NVS, hence after net init)
+    // dial_power_start() ran before prefs existed, so its first fade used the
+    // 100% RAM default; without this nudge a saved dimmer preference wouldn't
+    // apply until the next level change (~30s of full brightness after boot).
+    dial_power_brightness_changed();
 
     // Apply the saved rotation to the panel. The store only remembers it; the
     // display is what has to act on it.
