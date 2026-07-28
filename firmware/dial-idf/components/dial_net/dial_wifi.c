@@ -39,6 +39,7 @@ static EventGroupHandle_t s_events;
 static volatile bool s_connected;
 static int s_retries;
 static char s_ap_ssid[16];
+static char s_sta_ssid[33];   // home network name; see dial_net_sta_ssid()
 static char s_hostname[24];   // "orion-dial-xxxxxx" — see dial_net_hostname()
 static esp_netif_t *s_sta_netif, *s_ap_netif;
 static httpd_handle_t s_httpd;
@@ -230,6 +231,7 @@ void dial_net_init(void)
 }
 
 const char *dial_net_ap_ssid(void) { return s_ap_ssid; }
+const char *dial_net_sta_ssid(void) { return s_sta_ssid; }
 const char *dial_net_hostname(void) { return s_hostname; }
 bool dial_wifi_is_connected(void) { return s_connected; }
 
@@ -259,6 +261,8 @@ void dial_net_seed(const char *ssid, const char *pass)
 
 static bool sta_connect(const char *ssid, const char *pass, int timeout_ms)
 {
+    strlcpy(s_sta_ssid, ssid, sizeof(s_sta_ssid));   // the name a screen can show, win or lose
+
     wifi_config_t wc = { 0 };
     strncpy((char *)wc.sta.ssid, ssid, sizeof(wc.sta.ssid) - 1);
     strncpy((char *)wc.sta.password, pass, sizeof(wc.sta.password) - 1);

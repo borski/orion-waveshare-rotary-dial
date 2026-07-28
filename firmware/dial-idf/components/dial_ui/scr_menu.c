@@ -129,11 +129,18 @@ static lv_obj_t *make_update_row(lv_obj_t *parent, const app_state_t *st)
     lv_obj_clear_flag(row, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_add_event_cb(row, row_event_cb, LV_EVENT_CLICKED, (void *)(uintptr_t)SCR_UPDATE);
 
+    // CENTERED, exactly like every other row on this menu (make_row's
+    // lv_obj_center) — this row borrowed the Settings-screen label/value
+    // split at first, and a left-aligned label sitting among centered ones
+    // reads as broken alignment, not as a different row type.
     lv_obj_t *lbl = lv_label_create(row);
     lv_obj_set_style_text_font(lbl, &lv_font_montserrat_24, 0);
     lv_label_set_text(lbl, "Update");
-    lv_obj_align(lbl, LV_ALIGN_LEFT_MID, 0, 0);
+    lv_obj_center(lbl);
 
+    // The availability badge hangs off the right WITHOUT displacing the
+    // centered label, so the row still lines up with its neighbors whether
+    // or not an update is pending.
     s_val_update = lv_label_create(row);
     lv_obj_set_style_text_font(s_val_update, &lv_font_montserrat_16, 0);
     lv_obj_align(s_val_update, LV_ALIGN_RIGHT_MID, 0, 0);

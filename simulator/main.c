@@ -276,9 +276,31 @@ static void scenario_oauth_qr(void)
     st->phase = PH_OAUTH_WAIT_CONSENT;
     snprintf(st->oauth_url, sizeof(st->oauth_url),
              "https://github.com/chris023/orion-waveshare-rotary-dial");
+    // Plausible home-network name: exercises scr_setup.c's "Scan with a
+    // phone on ..." hint (Part 1 of the onboarding UX fix) instead of its
+    // generic no-SSID fallback.
+    snprintf(st->sta_ssid, sizeof(st->sta_ssid), "Kestrel-5G");
     ui_router_go(SCR_OAUTH_QR, NULL, LV_SCR_LOAD_ANIM_NONE);
     pump_ms(300);
     snapshot("oauth-qr");
+}
+
+// Same setup as scenario_oauth_qr, but pumps past the 45s-quiet threshold so
+// scr_setup.c's dismissible "still waiting" explainer (Part 2) is on screen
+// -- the field-incident case where the phone can't reach the dial's LAN
+// callback and nobody scanned a fresh code in the meantime.
+static void scenario_oauth_waiting(void)
+{
+    apply_baseline();
+    app_state_t *st = sim_state_ptr();
+    st->phase = PH_OAUTH_WAIT_CONSENT;
+    snprintf(st->oauth_url, sizeof(st->oauth_url),
+             "https://github.com/chris023/orion-waveshare-rotary-dial");
+    snprintf(st->sta_ssid, sizeof(st->sta_ssid), "Kestrel-5G");
+    ui_router_go(SCR_OAUTH_QR, NULL, LV_SCR_LOAD_ANIM_NONE);
+    pump_ms(300);
+    pump_ms(45500);   // clears scr_setup.c's OAUTH_WAIT_FIRST_MS (45000ms)
+    snapshot("oauth-waiting");
 }
 
 static void scenario_sidepick(void)
@@ -544,6 +566,7 @@ int main(void)
     scenario_netpick();
     scenario_passkey();
     scenario_oauth_qr();
+    scenario_oauth_waiting();
     scenario_sidepick();
     scenario_connecting();
     scenario_dial();
@@ -562,6 +585,6 @@ int main(void)
     scenario_updating();
     scenario_standby();
 
-    printf("done: 22 screens rendered to %s\n", DIAL_SIM_OUTPUT_DIR);
+    printf("done: 23 screens rendered to %s\n", DIAL_SIM_OUTPUT_DIR);
     return 0;
 }

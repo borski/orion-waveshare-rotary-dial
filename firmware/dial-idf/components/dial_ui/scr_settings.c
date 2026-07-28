@@ -153,11 +153,13 @@ static void row_units_cb(lv_event_t *e)
     dial_state_set_units_c(!st.units_c);
 }
 
-// "Dial adjusts": Schedule (Follow, default) makes a knob turn during
+// "Temp until": names the OUTCOME the user actually cares about — how
+// long the temperature they just dialed survives — rather than the
+// mechanism ("dial adjusts what?"). "Next step" (default) makes a knob turn during
 // tonight's active sleep-schedule phase retarget just that phase, leaving
-// the rest of tonight's schedule in control — matches the Orion app. Hold
-// reverts to holding the new setpoint for the rest of the night, this dial's
-// pre-M8 behavior. See app_state_t.sched_follow and main.c's
+// the rest of tonight's schedule in control — matches the Orion app.
+// "Morning" instead holds the new setpoint for the rest of the night, this
+// dial's pre-M8 behavior. See app_state_t.sched_follow and main.c's
 // temp_write_phase()/sleep_phase_now() for the write-path logic this picks.
 static void row_sched_follow_cb(lv_event_t *e)
 {
@@ -263,7 +265,7 @@ static void create(lv_obj_t *scr, void *arg)
     make_row(s_list, LV_SYMBOL_LEFT "  Back", row_back_cb, NULL);
     make_row(s_list, "Scale",         row_scale_cb,         &s_val_scale);
     make_row(s_list, "Units",         row_units_cb,         &s_val_units);
-    make_row(s_list, "Dial adjusts",  row_sched_follow_cb,  &s_val_sched_follow);
+    make_row(s_list, "Temp until",    row_sched_follow_cb,  &s_val_sched_follow);
     make_row(s_list, "Rotation",      row_rotation_cb,      &s_val_rotation);
     make_row(s_list, "Haptics",       row_haptics_cb,       &s_val_haptics);
     make_row(s_list, "Brightness",    row_brightness_cb,    NULL);
@@ -320,7 +322,7 @@ static void on_state(const app_state_t *st)
         lv_label_set_text(s_val_units, st->units_c ? "\xC2\xB0" "C (water)" : "\xC2\xB0" "F (water)");
     else
         lv_label_set_text(s_val_units, st->units_c ? "\xC2\xB0" "C" : "\xC2\xB0" "F");
-    lv_label_set_text(s_val_sched_follow, st->sched_follow ? "Schedule" : "Hold");
+    lv_label_set_text(s_val_sched_follow, st->sched_follow ? "Next step" : "Morning");
     // Indexed directly by the stored value (see app_state_t.haptics_level):
     // 0=Off, 1=Auto, 2=Low, 3=High.
     static const char *HAPTICS_TXT[] = { "Off", "Auto", "Low", "High" };

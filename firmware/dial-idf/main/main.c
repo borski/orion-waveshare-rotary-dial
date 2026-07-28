@@ -560,6 +560,7 @@ static const char *sleep_phase_field(sleep_phase_t p)
 static void mut_oauth_url(app_state_t *st, void *arg) { strlcpy(st->oauth_url, arg, sizeof(st->oauth_url)); }
 static void mut_retry_in(app_state_t *st, void *arg)  { st->retry_in_s = *(int *)arg; }
 static void mut_ap_ssid(app_state_t *st, void *arg)   { strlcpy(st->ap_ssid, arg, sizeof(st->ap_ssid)); }
+static void mut_sta_ssid(app_state_t *st, void *arg)  { strlcpy(st->sta_ssid, arg, sizeof(st->sta_ssid)); }
 static void mut_clock_valid(app_state_t *st, void *arg) { st->clock_valid = *(bool *)arg; }
 static void mut_fresh_device(app_state_t *st, void *arg) { st->fresh_device = *(bool *)arg; }
 
@@ -1432,6 +1433,12 @@ static void worker_task(void *arg)
     // ---- Wi-Fi (blocking bringup; portal phase published via events) ----
     dial_state_set_phase(PH_WIFI_CONNECTING, NULL);
     dial_net_bringup();
+    // Bringup only returns once connected, so this is the home network's real
+    // name -- SCR_OAUTH_QR names it explicitly (the callback that finishes
+    // linking is a LAN redirect to the dial; a phone on cellular or a guest
+    // network can never deliver it, and that trap has already cost a real
+    // debugging session -- see the QR screen's own comment).
+    dial_state_commit(mut_sta_ssid, (void *)dial_net_sta_ssid());
     dial_time_start();
     mdns_bringup();   // BEFORE the OAuth callback server (below) ever starts
 

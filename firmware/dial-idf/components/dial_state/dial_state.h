@@ -201,6 +201,12 @@ typedef struct {
     int     retry_in_s;       // seconds until the supervisor's next retry (0 = n/a)
     char    oauth_url[600];   // authorize URL while PH_OAUTH_WAIT_CONSENT
     char    ap_ssid[33];      // SoftAP name while PH_WIFI_PORTAL
+    // The dial's own HOME network SSID (dial_net_sta_ssid() mirror, committed
+    // once worker_task's dial_net_bringup() returns). NOT ap_ssid above --
+    // this is the network SCR_OAUTH_QR tells the user their PHONE must also be
+    // on, since the OAuth callback is a LAN redirect to the dial and cannot
+    // reach it over cellular or a different network. "" if unknown.
+    char    sta_ssid[33];
 
     /*
      * On-device Wi-Fi setup. A rejected password must not throw the user back
