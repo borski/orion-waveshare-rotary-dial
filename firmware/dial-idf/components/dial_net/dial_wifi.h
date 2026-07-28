@@ -57,6 +57,16 @@ void dial_net_bringup(void);
 // The SoftAP SSID used during setup (e.g. "OrionDial-A1B2"). Valid after init.
 const char *dial_net_ap_ssid(void);
 
+// Stable per-device mDNS hostname suffix (e.g. "orion-dial-a1b2c3"), derived
+// from the same MAC read as dial_net_ap_ssid's suffix above (see
+// dial_net_init) — just 3 bytes instead of 2, lowercase since this one is
+// only ever used inside a URL, never shown to a person picking a Wi-Fi
+// network. Valid after dial_net_init(). Stable across DHCP lease changes
+// (unlike the station's IP), which is the whole point: the OAuth redirect_uri
+// is built from "<this>.local" instead of the IP so a lease change can never
+// again silently invalidate the registered OAuth client.
+const char *dial_net_hostname(void);
+
 /*
  * On-device setup (no phone). The dial can list the networks it can see and
  * take credentials from its own screen, which is the fallback for anyone who

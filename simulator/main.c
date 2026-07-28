@@ -196,7 +196,7 @@ static void apply_baseline(void)
     st->units_c = false;
     st->rel_mode = false;   // absolute by default; relative scenarios opt in
     st->rotation = 0;
-    st->haptics_enabled = true;
+    st->haptics_level = 1;   // HAPTIC_LEVEL_AUTO
     st->welcomed = true;
     st->side_picked = true;
     st->ui_zone = ZONE_A;
@@ -398,12 +398,13 @@ static void scenario_tonight_relative(void)
     snapshot("tonight-relative");
 }
 
-// Also documents the M6 "Install X.Y.Z" row (menu discoverability for the
-// update control that used to live only in About): sets the OTA status to
-// available with a pending version before navigating, then knob-walks focus
-// down onto the new row itself (Back/Tonight/Settings/Wi-Fi/About/Install —
-// 4 detents past the "Tonight" the list opens on) so menu.png actually shows
-// the row it's meant to document, not just proves it doesn't crash off-frame.
+// Also documents the M7 permanent "Update" row (replaces the M6 conditional
+// "Install X.Y.Z" row — confirmation moved into SCR_UPDATE itself, this row
+// is now pure navigation): sets the OTA status to available with a pending
+// version before navigating, then knob-walks focus down onto the row itself
+// (Back/Tonight/Settings/Wi-Fi/About/Update — 4 detents past the "Tonight"
+// the list opens on) so menu.png actually shows the version badge it's
+// meant to document, not just proves it doesn't crash off-frame.
 static void scenario_menu(void)
 {
     apply_baseline();
@@ -413,10 +414,25 @@ static void scenario_menu(void)
     st->generation++;
     ui_router_go(SCR_MENU, NULL, LV_SCR_LOAD_ANIM_NONE);
     pump_ms(300);
-    sim_knob(4);           // Tonight -> Install 1.0.10
+    sim_knob(4);           // Tonight -> Update (badge: "1.0.10")
     pump_ms(300);
     pump_until_idle(800);  // rotor snap is an lv_anim; land before the capture
     snapshot("menu");
+}
+
+// The Update submenu (M7), opened with an update pending — shows "Check for
+// updates"' AVAILABLE state (tap-to-confirm prompt not yet armed) and the
+// Beta builds toggle in its default Off state beneath it.
+static void scenario_update(void)
+{
+    apply_baseline();
+    app_state_t *st = sim_state_ptr();
+    st->ota.status = OTA_AVAILABLE;
+    snprintf(st->ota.latest, sizeof(st->ota.latest), "1.1.0");
+    st->generation++;
+    ui_router_go(SCR_UPDATE, NULL, LV_SCR_LOAD_ANIM_NONE);
+    pump_ms(300);
+    snapshot("update");
 }
 
 static void scenario_settings(void)
@@ -425,6 +441,17 @@ static void scenario_settings(void)
     ui_router_go(SCR_SETTINGS, NULL, LV_SCR_LOAD_ANIM_NONE);
     pump_ms(300);
     snapshot("settings");
+}
+
+// The Brightness submenu (M7, collapses Settings' old separate Day/Night
+// rows): shows both last-committed percents read straight off app_state_t,
+// same contract those two rows had before the collapse.
+static void scenario_brightness_menu(void)
+{
+    apply_baseline();
+    ui_router_go(SCR_BRIGHTNESS_MENU, NULL, LV_SCR_LOAD_ANIM_NONE);
+    pump_ms(300);
+    snapshot("brightness-menu");
 }
 
 // The full-screen SCR_BRIGHTNESS picker (replaces the old inline settings-row
@@ -526,13 +553,15 @@ int main(void)
     scenario_tonight();
     scenario_tonight_relative();
     scenario_menu();
+    scenario_update();
     scenario_settings();
+    scenario_brightness_menu();
     scenario_settings_brightness();
     scenario_wifi_info();
     scenario_about();
     scenario_updating();
     scenario_standby();
 
-    printf("done: 20 screens rendered to %s\n", DIAL_SIM_OUTPUT_DIR);
+    printf("done: 22 screens rendered to %s\n", DIAL_SIM_OUTPUT_DIR);
     return 0;
 }
