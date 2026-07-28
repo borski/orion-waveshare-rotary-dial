@@ -64,6 +64,7 @@ static lv_obj_t *s_pill, *s_pill_glyph, *s_pill_word;
 static lv_obj_t *s_power_btn, *s_power_glyph;
 static lv_obj_t *s_dot_a, *s_dot_b, *s_dot_menu;
 static lv_obj_t *s_away_lbl;
+static lv_obj_t *s_ota_lbl;   // "Finalizing update..." — see create()
 static lv_point_t s_dash_pts[2];
 
 static zone_idx_t s_zone = ZONE_A;
@@ -470,6 +471,14 @@ static void apply_palette_and_state(const app_state_t *st)
     lv_obj_set_style_text_color(s_away_lbl, pal->ink_secondary, 0);
     if (st->away) lv_obj_clear_flag(s_away_lbl, LV_OBJ_FLAG_HIDDEN);
     else          lv_obj_add_flag(s_away_lbl, LV_OBJ_FLAG_HIDDEN);
+
+    // Pending-verify notice (OTA rollback fix, M6) — see create() for why
+    // it lives here; mirrors dial_ota_info_t.pending_verify via main.c's
+    // mut_ota(), so it clears the moment ota_confirm_once() (first poll, or
+    // the 30s fallback timer) actually confirms the image.
+    lv_obj_set_style_text_color(s_ota_lbl, pal->ink_secondary, 0);
+    if (st->ota.pending_verify) lv_obj_clear_flag(s_ota_lbl, LV_OBJ_FLAG_HIDDEN);
+    else                        lv_obj_add_flag(s_ota_lbl, LV_OBJ_FLAG_HIDDEN);
 }
 
 // The value passed in is always °F — the internal representation. Relative mode
@@ -823,6 +832,25 @@ static void create(lv_obj_t *scr, void *arg)
     lv_obj_clear_flag(s_away_lbl, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_align(s_away_lbl, LV_ALIGN_CENTER, 180 - CX, 44 - CY);
     lv_obj_add_flag(s_away_lbl, LV_OBJ_FLAG_HIDDEN);
+
+    // Pending-verify notice (OTA rollback fix, M6) — tiny, hidden unless
+    // st->ota.pending_verify (a fresh OTA install the bootloader will roll
+    // back on the next power-cycle unless it survives to confirm; see
+    // main.c's ota_confirm_once()). Parked in the one genuinely dead patch
+    // of this carefully-laid-out face rather than a new region: the gap
+    // between the power disc's bottom edge (#11, 280+44=324) and the page
+    // dots (#13, y=340) sits squarely inside the arc's own 90deg gap at 6
+    // o'clock (#2), the same void the disc and dots already share — and,
+    // unlike everything else here, this notice is itself transient (gone
+    // within ~30s of boot, or the first successful poll), so it doesn't
+    // earn a permanent claim on any busier real estate.
+    s_ota_lbl = lv_label_create(scr);
+    lv_obj_set_style_text_font(s_ota_lbl, &lv_font_montserrat_12, 0);
+    lv_obj_set_style_text_align(s_ota_lbl, LV_TEXT_ALIGN_CENTER, 0);
+    lv_label_set_text(s_ota_lbl, "Finalizing update...");
+    lv_obj_clear_flag(s_ota_lbl, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_align(s_ota_lbl, LV_ALIGN_CENTER, 0, 330 - CY);
+    lv_obj_add_flag(s_ota_lbl, LV_OBJ_FLAG_HIDDEN);
 }
 
 static void destroy(void)
@@ -848,6 +876,7 @@ static void destroy(void)
     s_power_btn = s_power_glyph = NULL;
     s_dot_a = s_dot_b = s_dot_menu = NULL;
     s_away_lbl = NULL;
+    s_ota_lbl = NULL;
     s_chevron_active = false;
     s_stale_shown = false;
 }

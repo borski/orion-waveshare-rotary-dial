@@ -450,6 +450,7 @@ static void mut_ota(app_state_t *st, void *arg)
     strlcpy(st->ota.latest, info->latest, sizeof(st->ota.latest));
     st->ota.progress_pct = info->progress_pct;
     strlcpy(st->ota.err, info->err, sizeof(st->ota.err));
+    st->ota.pending_verify = info->pending_verify;
 }
 
 // Fetches the fresh dial_ota_get() snapshot and commits it.
@@ -464,12 +465,47 @@ static void commit_ota_snapshot(void)
 // idempotent, but there's nothing left to confirm after the first success —
 // this guards against re-reading the OTA partition state on every ~10s poll
 // for the rest of the device's uptime.
+//
+// Field incident: this used to be the ONLY confirm path, reached solely via
+// "first successful Orion poll" below (and its steady-state twin) — 30-60+s
+// after boot, and hostage to Wi-Fi + TLS + OAuth + MCP + a poll ALL
+// succeeding. A user power-cycled inside that window and the bootloader
+// silently reverted a good install because it never got the chance to
+// confirm; worse, on a network outage post-update it could never confirm at
+// all. Rollback exists to catch a genuinely BROKEN image, not to hold a good
+// one hostage to a cloud outage — a broken image crash-loops well inside 30
+// seconds. See the 30s ota_confirm_timer_cb fallback armed in app_main:
+// whichever of that timer or a real poll success gets here first wins (this
+// function is idempotent via s_ota_confirmed), and the loser's call becomes
+// a no-op.
 static bool s_ota_confirmed;
 static void ota_confirm_once(void)
 {
     if (s_ota_confirmed) return;
     dial_ota_mark_valid_if_pending();
     s_ota_confirmed = true;
+    // Push the fresh snapshot (pending_verify very likely just flipped
+    // false) so scr_connecting/scr_dial's "Finalizing update" notice drops
+    // immediately, instead of waiting for some unrelated OTA-mirror commit.
+    commit_ota_snapshot();
+}
+
+// The 30s stable-boot fallback itself (armed once from app_main). Runs in
+// the esp_timer task, not an ISR -- esp_timer's default ESP_TIMER_TASK
+// dispatch method, so calling into esp_ota_ops (via ota_confirm_once ->
+// dial_ota_mark_valid_if_pending) here is safe, same as calling it from the
+// worker task. The only cross-task hazard is s_ota_confirmed itself, which
+// is a plain bool read-then-write from two possible callers (this timer's
+// task and the worker task) with no lock; the benign race is a redundant
+// dial_ota_mark_valid_if_pending() call if both sides read it false before
+// either sets it true -- that function is itself idempotent (re-marking an
+// already-valid partition, or re-reading a state that's already settled), so
+// the worst case is one harmless extra flash-state read, never a double
+// confirm or a lost one.
+static void ota_confirm_timer_cb(void *arg)
+{
+    (void)arg;
+    ota_confirm_once();
 }
 
 // No-op mutator: dial_state_commit() bumps the generation unconditionally, so
@@ -1488,6 +1524,13 @@ void app_main(void)
     dial_display_set_touch_filter(touch_filter);
     dial_power_start();
 
+    // Capture the boot's pending-verify state (rollback armed?) and mirror
+    // it into app_state_t BEFORE the first screen renders below -- the
+    // user needs the "don't unplug" warning from frame one, not 30s+ from
+    // now when ota_confirm_once() would otherwise first touch this state.
+    dial_ota_init();
+    commit_ota_snapshot();
+
     // Router + screens live in the LVGL task from here on. ui_router_start
     // needs the LVGL lock because the LVGL task is already running.
     ui_screens_register_all();
@@ -1525,6 +1568,22 @@ void app_main(void)
     }
     dial_net_seed(WIFI_SSID, WIFI_PASSWORD);
     dial_state_commit(mut_ap_ssid, (void *)dial_net_ap_ssid());
+
+    // 30s stable-boot fallback confirm (see ota_confirm_once()'s comment for
+    // the field incident this fixes): a crash-looping bad image never
+    // survives anywhere near 30s, so this can't paper over a genuinely
+    // broken update -- it only stops a cloud/network outage from holding a
+    // GOOD image hostage to rollback. One-shot, never re-armed; left
+    // allocated for the rest of the device's uptime rather than deleted
+    // after firing, same as this codebase's other long-lived esp_timers
+    // (e.g. dial_wifi.c's retry timer).
+    const esp_timer_create_args_t ota_confirm_timer_args = {
+        .callback = ota_confirm_timer_cb,
+        .name = "ota_confirm",
+    };
+    esp_timer_handle_t ota_confirm_timer;
+    ESP_ERROR_CHECK(esp_timer_create(&ota_confirm_timer_args, &ota_confirm_timer));
+    ESP_ERROR_CHECK(esp_timer_start_once(ota_confirm_timer, 30ULL * 1000000ULL));
 
     // OAuth/TLS/MCP need a big stack; everything network runs on this task.
     // Priority 3 and pinned to core 0 — BELOW the LVGL task (5, core 1), which

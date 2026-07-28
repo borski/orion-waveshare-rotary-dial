@@ -14,19 +14,35 @@
  * The rows live in a rotor list (dial_list.h): one row snaps focused to the
  * vertical center, neighbors shrink/fade toward the bezel, and the knob
  * walks focus one row per detent.
+ *
+ * One row is conditional: "Install X.Y.Z" (M6 discoverability — the update
+ * control used to live only in About, which owner feedback called hard to
+ * find), appended after About whenever st->ota.status is OTA_AVAILABLE and
+ * removed the instant it isn't — see the "install update row" section below.
  */
 #include "ui_screens_internal.h"
 #include "dial_haptics.h"
 #include "dial_list.h"
+#include "dial_ota.h"
 
 #define CX 180
 #define CY 180
 #define ARC_R 165
 #define ROW_H 72
+#define OTA_CONFIRM_WINDOW_MS 3000
 
 static lv_obj_t *s_ring;
 static lv_obj_t *s_list;
 static lv_obj_t *s_dot_a, *s_dot_b, *s_dot_menu;
+
+// "Install X.Y.Z" row — present only while an update is available.
+static lv_obj_t   *s_row_ota;          // NULL when no update is available
+static lv_obj_t   *s_lbl_ota;          // that row's single centered label
+static bool        s_ota_armed;        // "Tap again to install" is showing
+static uint32_t    s_ota_armed_at_ms;
+static bool        s_ota_apply_sent;   // confirmed; holding the label until the worker catches up
+static char        s_ota_latest[16];   // cached "X.Y.Z" for the resting label text
+static lv_timer_t *s_ota_confirm_timer;
 
 /* ---- row factory -----------------------------------------------------*/
 
@@ -81,6 +97,132 @@ static lv_obj_t *make_row(lv_obj_t *parent, const char *label_txt, screen_id_t d
     return row;
 }
 
+/* ---- "install update" row (M6 discoverability) ----------------------------
+ * Appended after About whenever st->ota.status == OTA_AVAILABLE, deleted the
+ * instant it isn't — an actual add/remove rather than a hidden always-present
+ * row, because dial_list's rotor math (dial_list.c) counts children directly
+ * (lv_obj_get_child_cnt) for both its knob-clamp range and its zoom/fade
+ * pass, and LVGL's flex layout skips HIDDEN children entirely (lv_flex.c) —
+ * a hidden row would still occupy a knob-reachable slot with no widget ever
+ * laid out under it, an off-by-one the user would feel as the list falling
+ * one row short at the far end. Add/remove keeps the child count and the
+ * visible row count in exact agreement, at the cost of this section existing.
+ *
+ * Installing takes over the screen for minutes, so a stray tap must not fire
+ * it — same tap-twice-within-3s confirm pattern scr_settings.c's destructive
+ * rows and scr_about.c's Software update row use (About's s_ota_apply_sent
+ * latch included: it holds "Starting install..." over the gap between the
+ * confirming tap and the worker actually draining CMD_OTA_APPLY, so a routine
+ * unrelated state commit landing in that gap can't repaint the row back to
+ * its pre-confirm text — see scr_about.c's row_ota_cb/render_ota_row comments
+ * for the field incident that guard fixes).
+ */
+
+static void set_ota_resting_label(void)
+{
+    if (!s_lbl_ota) return;
+    char buf[32];
+    snprintf(buf, sizeof(buf), "Install %s", s_ota_latest);
+    lv_label_set_text(s_lbl_ota, buf);
+}
+
+static void row_install_cb(lv_event_t *e)
+{
+    (void)e;
+    app_state_t st;
+    dial_state_get(&st);
+    if ((dial_ota_status_t)st.ota.status != OTA_AVAILABLE) return;   // stale tap, row about to go
+    if (s_ota_apply_sent) return;   // already confirmed; worker hasn't drained CMD_OTA_APPLY yet
+
+    if (s_ota_armed && lv_tick_elaps(s_ota_armed_at_ms) < OTA_CONFIRM_WINDOW_MS) {
+        s_ota_armed = false;
+        dial_haptics_play(HAPTIC_CONFIRM);
+        s_ota_apply_sent = true;
+        if (s_lbl_ota) lv_label_set_text(s_lbl_ota, "Starting install...");
+        app_cmd_t cmd = { .kind = CMD_OTA_APPLY };
+        dial_cmd_post(&cmd);
+        return;
+    }
+
+    s_ota_armed = true;
+    s_ota_armed_at_ms = lv_tick_get();
+    dial_haptics_play(HAPTIC_TICK);
+    if (s_lbl_ota) lv_label_set_text(s_lbl_ota, "Tap again to install");
+}
+
+// Ages the "Tap again to install" prompt back out after 3s of no second tap —
+// same 250ms sweep idiom scr_settings.c/scr_about.c run for their own confirm
+// rows (which this screen otherwise has none of, hence its own small timer).
+static void ota_confirm_timer_cb(lv_timer_t *t)
+{
+    (void)t;
+    if (s_ota_armed && lv_tick_elaps(s_ota_armed_at_ms) >= OTA_CONFIRM_WINDOW_MS) {
+        s_ota_armed = false;
+        set_ota_resting_label();
+    }
+}
+
+static lv_obj_t *make_ota_row(lv_obj_t *parent)
+{
+    lv_obj_t *row = lv_obj_create(parent);
+    lv_obj_set_size(row, LV_PCT(100), ROW_H);
+    lv_obj_set_style_radius(row, 12, 0);
+    lv_obj_set_style_border_width(row, 0, 0);
+    lv_obj_set_style_bg_opa(row, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_bg_opa(row, LV_OPA_COVER, LV_STATE_PRESSED);
+    lv_obj_clear_flag(row, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_event_cb(row, row_install_cb, LV_EVENT_CLICKED, NULL);
+
+    s_lbl_ota = lv_label_create(row);
+    lv_obj_set_style_text_font(s_lbl_ota, &lv_font_montserrat_24, 0);
+    lv_obj_center(s_lbl_ota);
+    return row;
+}
+
+// dial_list's zoom/fade recompute (rotor_update, dial_list.c) only runs off
+// LV_EVENT_SCROLL — fine for the knob/drag paths that already fire one, but
+// a row this function adds or removes lands OUTSIDE that path (create()'s
+// initial build is covered by dial_list_settle()'s own pass instead; this
+// matters for a row appearing/disappearing while the menu is already open).
+// Force a layout + synthesize the scroll event dial_list already listens
+// for, so the row is never left sitting at LVGL's untransformed defaults
+// until the next real scroll or knob turn.
+static void refresh_list_transforms(void)
+{
+    lv_obj_update_layout(s_list);
+    lv_event_send(s_list, LV_EVENT_SCROLL, NULL);
+}
+
+// Keeps the row's existence + label in step with the worker-owned OTA
+// status. Called from both create() (a menu opened with an update already
+// pending shows the row from frame one) and on_state() (a check/download
+// that starts or finishes WHILE the menu is open is reflected live, without
+// leaving the router).
+static void sync_ota_row(const app_state_t *st)
+{
+    bool avail = ((dial_ota_status_t)st->ota.status == OTA_AVAILABLE);
+    if (avail) strlcpy(s_ota_latest, st->ota.latest, sizeof(s_ota_latest));
+
+    if (avail && !s_row_ota) {
+        s_row_ota = make_ota_row(s_list);
+        set_ota_resting_label();
+        refresh_list_transforms();
+        return;
+    }
+    if (!avail && s_row_ota) {
+        lv_obj_del(s_row_ota);
+        s_row_ota = NULL;
+        s_lbl_ota = NULL;
+        s_ota_armed = false;
+        s_ota_apply_sent = false;
+        refresh_list_transforms();
+        return;
+    }
+    if (!s_row_ota || s_ota_armed) return;   // no row to label, or "Tap again..." holds
+    if (s_ota_apply_sent) return;            // holding "Starting install..." (see header comment)
+    set_ota_resting_label();
+}
+
 /* ---- palette -----------------------------------------------------------*/
 
 // Walks s_list generically (row -> its one label) instead of naming four
@@ -114,6 +256,11 @@ static void apply_palette(const app_state_t *st)
 static void create(lv_obj_t *scr, void *arg)
 {
     (void)arg;
+    s_row_ota = NULL;
+    s_lbl_ota = NULL;
+    s_ota_armed = false;
+    s_ota_apply_sent = false;
+    s_ota_latest[0] = '\0';
     const dial_palette_t *pal = PAL();
     lv_obj_set_style_bg_color(scr, pal->bg, 0);
 
@@ -162,20 +309,33 @@ static void create(lv_obj_t *scr, void *arg)
 
     app_state_t st;
     dial_state_get(&st);
+    // Before apply_palette()'s generic row walk, so a menu opened with an
+    // update already available shows the "Install X.Y.Z" row correctly
+    // colored from frame one instead of catching up on the next state commit.
+    sync_ota_row(&st);
     apply_palette(&st);
     dial_list_settle(s_list, 1);   // open on "Tonight", not on Back
+    s_ota_confirm_timer = lv_timer_create(ota_confirm_timer_cb, 250, NULL);
 }
 
 static void destroy(void)
 {
+    if (s_ota_confirm_timer) { lv_timer_del(s_ota_confirm_timer); s_ota_confirm_timer = NULL; }
     s_ring = NULL;
     s_list = NULL;
     s_dot_a = s_dot_b = s_dot_menu = NULL;
+    s_row_ota = NULL;
+    s_lbl_ota = NULL;
+    s_ota_armed = false;
+    s_ota_apply_sent = false;
 }
 
 static void on_state(const app_state_t *st)
 {
     if (!s_ring) return;
+    // Before apply_palette(), same ordering reason as create(): a row this
+    // adds needs to exist before the generic palette walk reaches it.
+    sync_ota_row(st);
     apply_palette(st);   // palette + the page-dot row (zone count can change under us)
 }
 

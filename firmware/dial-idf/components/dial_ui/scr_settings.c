@@ -9,50 +9,32 @@
  * zoomed/faded for the round panel; knob walks one row per detent, a finger
  * drag free-scrolls then snaps). Tap activates a row. The two destructive
  * rows (re-link/factory reset) use a tap-twice-within-3s confirm pattern
- * instead of firing immediately. The two brightness rows (Day/Night) use a
- * tap-to-edit pattern instead: a tap steals the knob from the list to drive
- * that row's percent live (with a real dial_power_preview() fade on every
- * detent), until a second tap, 5s of inactivity, or leaving the screen
- * commits it — see the "brightness edit mode" section below.
+ * instead of firing immediately. The two brightness rows (Day/Night) are
+ * plain navigation rows, like every other row here: a tap opens the
+ * full-screen SCR_BRIGHTNESS picker (scr_brightness.c), which owns the
+ * live dial_power_preview() fade and the actual commit — this screen only
+ * ever shows the last-committed percent, read straight from app_state_t.
  */
 #include "ui_screens_internal.h"
 #include "dial_haptics.h"
 #include "dial_list.h"
 #include "dial_display.h"
-#include "dial_power.h"
 
 #define CY 180
 #define ROW_H          76
 #define CONFIRM_WINDOW_MS 3000
-#define BRI_EDIT_TIMEOUT_MS 5000
-#define BRI_STEP_PCT   10
 
 static lv_obj_t *s_title_lbl;
 static lv_obj_t *s_list;
 static lv_obj_t *s_val_scale, *s_val_units, *s_val_haptics, *s_val_rotation;
-static lv_obj_t *s_row_bri_day, *s_val_bri_day;
-static lv_obj_t *s_row_bri_night, *s_val_bri_night;
+static lv_obj_t *s_val_bri_day;
+static lv_obj_t *s_val_bri_night;
 
 typedef enum { CONFIRM_RELINK = 0, CONFIRM_FACTORY, CONFIRM_COUNT } confirm_id_t;
 static lv_obj_t   *s_val_confirm[CONFIRM_COUNT];
 static confirm_id_t s_armed = CONFIRM_COUNT;   // CONFIRM_COUNT = "none armed"
 static uint32_t     s_armed_at_ms;
-static lv_timer_t   *s_confirm_timer;          // also drives the brightness edit timeout below
-
-// Day/night brightness tap-to-edit. Only one row (or neither) is ever being
-// edited; while it is, the knob drives s_bri_pct instead of the rotor list
-// (see on_knob), and the row's value label is drawn accented (see
-// apply_palette). Entered/exited exclusively through bri_edit_enter/exit so
-// the preview + persistence + list-routing invariants can't drift apart.
-typedef enum { BRI_EDIT_NONE = -1, BRI_EDIT_DAY = 0, BRI_EDIT_NIGHT = 1 } bri_edit_t;
-static bri_edit_t s_bri_edit = BRI_EDIT_NONE;
-static uint8_t    s_bri_pct;
-static uint32_t   s_bri_edit_at_ms;
-
-// Forward decl: brightness edit mode (below) re-renders the affected row's
-// accent the instant it's entered/exited, well before this screen's own
-// palette section is defined further down the file.
-static void apply_palette(lv_obj_t *scr);
+static lv_timer_t   *s_confirm_timer;
 
 /* ---- row factory --------------------------------------------------------*/
 
@@ -98,22 +80,13 @@ static void confirm_disarm(void)
     s_armed = CONFIRM_COUNT;
 }
 
-// Forward decl: brightness edit mode's own exit, called below from the same
-// 250ms poll that ages out an armed confirm row (see the timer's new second
-// job, right underneath).
-static void bri_edit_exit(void);
-
 // Ticks while a confirm row is armed, so the "tap again" prompt reverts if
-// the 3s window lapses without a second tap. Also ages out brightness edit
-// mode after 5s of no knob/tap activity (task spec's 3rd exit condition) —
-// one screen, one lightweight poll timer, same as the confirm rows use.
+// the 3s window lapses without a second tap.
 static void confirm_timer_cb(lv_timer_t *t)
 {
     (void)t;
     if (s_armed != CONFIRM_COUNT && lv_tick_elaps(s_armed_at_ms) >= CONFIRM_WINDOW_MS)
         confirm_disarm();
-    if (s_bri_edit != BRI_EDIT_NONE && lv_tick_elaps(s_bri_edit_at_ms) >= BRI_EDIT_TIMEOUT_MS)
-        bri_edit_exit();
 }
 
 // Returns true if this tap landed within the window of a matching prior tap
@@ -129,51 +102,6 @@ static bool confirm_tap(confirm_id_t id)
     s_armed_at_ms = lv_tick_get();
     confirm_set_label(id, "Tap again to confirm");
     return false;
-}
-
-/* ---- brightness edit mode -------------------------------------------------
- * Tap a Day/Night brightness row to enter; the knob then drives s_bri_pct
- * (+-10%/detent, clamped 10..100) instead of walking the rotor list, with a
- * live dial_power_preview() so the panel shows the candidate value as it's
- * dialed in. Exits (second tap of the same row / 5s idle / teardown) always
- * go through bri_edit_exit(), which is what actually persists the value —
- * nothing is written to NVS or dial_power's normal duty tables until then.
- */
-
-static void bri_set_val_label(void)
-{
-    lv_obj_t *val = (s_bri_edit == BRI_EDIT_DAY) ? s_val_bri_day : s_val_bri_night;
-    char buf[8];
-    snprintf(buf, sizeof buf, "%u%%", (unsigned)s_bri_pct);
-    lv_label_set_text(val, buf);
-}
-
-static void bri_edit_enter(bri_edit_t which)
-{
-    s_bri_edit = which;
-    s_bri_pct = (which == BRI_EDIT_DAY) ? dial_state_get_bri_day_pct()
-                                         : dial_state_get_bri_night_pct();
-    s_bri_edit_at_ms = lv_tick_get();
-    dial_power_preview(which == BRI_EDIT_NIGHT, s_bri_pct);
-    bri_set_val_label();
-    if (s_list) apply_palette(lv_obj_get_parent(s_list));
-}
-
-// The one exit path for every trigger in the header comment above (second
-// tap / 5s timeout / screen teardown) — persists, ends the live preview, and
-// tells dial_power to re-fade to the real (non-preview) duty. No-op if
-// nothing is being edited, so callers (including destroy()) can call it
-// unconditionally.
-static void bri_edit_exit(void)
-{
-    if (s_bri_edit == BRI_EDIT_NONE) return;
-    bri_edit_t was = s_bri_edit;
-    dial_power_preview_end();
-    if (was == BRI_EDIT_DAY) dial_state_set_bri_day_pct(s_bri_pct);
-    else                     dial_state_set_bri_night_pct(s_bri_pct);
-    dial_power_brightness_changed();
-    s_bri_edit = BRI_EDIT_NONE;
-    if (s_list) apply_palette(lv_obj_get_parent(s_list));
 }
 
 /* ---- row actions ---------------------------------------------------------*/
@@ -238,35 +166,23 @@ static void row_haptics_cb(lv_event_t *e)
     dial_haptics_play(HAPTIC_CONFIRM);   // audible only if now enabled
 }
 
-// Tap toggles edit mode for THIS row: a second tap while it's already the one
-// being edited commits (same as the timeout); a first tap — whether nothing
-// was being edited, or the OTHER brightness row was — (re)enters it here,
-// cleanly closing out whatever was open first so preview/persist never leaks
-// between the two rows.
+// Both open the full-screen SCR_BRIGHTNESS picker (scr_brightness.c), packing
+// which row it was opened from (0 = day, 1 = night) — plain navigation, same
+// as every other row on this screen. The picker owns the live preview and
+// commits on its own exit; this screen just shows whatever it last committed
+// (see on_state).
 static void row_bri_day_cb(lv_event_t *e)
 {
     (void)e;
-    if (s_bri_edit == BRI_EDIT_DAY) {
-        bri_edit_exit();
-        dial_haptics_play(HAPTIC_CONFIRM);
-        return;
-    }
-    bri_edit_exit();   // no-op unless the NIGHT row was mid-edit
-    bri_edit_enter(BRI_EDIT_DAY);
     dial_haptics_play(HAPTIC_TICK);
+    ui_router_go(SCR_BRIGHTNESS, (void *)(uintptr_t)0, LV_SCR_LOAD_ANIM_NONE);
 }
 
 static void row_bri_night_cb(lv_event_t *e)
 {
     (void)e;
-    if (s_bri_edit == BRI_EDIT_NIGHT) {
-        bri_edit_exit();
-        dial_haptics_play(HAPTIC_CONFIRM);
-        return;
-    }
-    bri_edit_exit();   // no-op unless the DAY row was mid-edit
-    bri_edit_enter(BRI_EDIT_NIGHT);
     dial_haptics_play(HAPTIC_TICK);
+    ui_router_go(SCR_BRIGHTNESS, (void *)(uintptr_t)1, LV_SCR_LOAD_ANIM_NONE);
 }
 
 static void row_relink_cb(lv_event_t *e)
@@ -305,17 +221,6 @@ static void apply_palette(lv_obj_t *scr)
             lv_obj_set_style_text_color(lbl, j == 0 ? pal->ink_primary : pal->ink_secondary, 0);
         }
     }
-
-    // Brightness edit mode: accent the row being edited (border + value label
-    // both bumped to ink_primary, same weight as the label column already
-    // uses) so it reads as "live" without reaching for a thermal/warning/
-    // identity token that means something else everywhere else on the dial.
-    if (s_bri_edit != BRI_EDIT_NONE) {
-        lv_obj_t *row = (s_bri_edit == BRI_EDIT_DAY) ? s_row_bri_day : s_row_bri_night;
-        lv_obj_t *val = (s_bri_edit == BRI_EDIT_DAY) ? s_val_bri_day : s_val_bri_night;
-        if (row) lv_obj_set_style_border_color(row, pal->ink_primary, 0);
-        if (val) lv_obj_set_style_text_color(val, pal->ink_primary, 0);
-    }
 }
 
 /* ---- vtable ----------------------------------------------------------------*/
@@ -324,7 +229,6 @@ static void create(lv_obj_t *scr, void *arg)
 {
     (void)arg;
     s_armed = CONFIRM_COUNT;
-    s_bri_edit = BRI_EDIT_NONE;
     const dial_palette_t *pal = PAL();
     lv_obj_set_style_bg_color(scr, pal->bg, 0);
 
@@ -338,8 +242,8 @@ static void create(lv_obj_t *scr, void *arg)
     make_row(s_list, "Units",         row_units_cb,         &s_val_units);
     make_row(s_list, "Rotation",      row_rotation_cb,      &s_val_rotation);
     make_row(s_list, "Haptics",       row_haptics_cb,       &s_val_haptics);
-    s_row_bri_day   = make_row(s_list, "Day brightness",   row_bri_day_cb,   &s_val_bri_day);
-    s_row_bri_night = make_row(s_list, "Night brightness", row_bri_night_cb, &s_val_bri_night);
+    make_row(s_list, "Day brightness",   row_bri_day_cb,   &s_val_bri_day);
+    make_row(s_list, "Night brightness", row_bri_night_cb, &s_val_bri_night);
     make_row(s_list, "Re-link Orion", row_relink_cb,        &s_val_confirm[CONFIRM_RELINK]);
     make_row(s_list, "Factory reset", row_factory_reset_cb, &s_val_confirm[CONFIRM_FACTORY]);
 
@@ -371,16 +275,10 @@ static void create(lv_obj_t *scr, void *arg)
 static void destroy(void)
 {
     if (s_confirm_timer) { lv_timer_del(s_confirm_timer); s_confirm_timer = NULL; }
-    // Teardown is one of bri_edit_exit's three documented triggers (alongside
-    // a second tap / the 5s timeout) — persists whatever was being dialed in
-    // and ends the live LEDC preview so it can never outlive this screen.
-    // No-op if nothing was being edited.
-    bri_edit_exit();
     s_list = NULL;
     s_title_lbl = NULL;
     s_val_scale = s_val_units = s_val_haptics = s_val_rotation = NULL;
     s_val_bri_day = s_val_bri_night = NULL;
-    s_row_bri_day = s_row_bri_night = NULL;
     for (int i = 0; i < CONFIRM_COUNT; i++) s_val_confirm[i] = NULL;
     s_armed = CONFIRM_COUNT;
 }
@@ -402,44 +300,21 @@ static void on_state(const app_state_t *st)
         lv_label_set_text(s_val_units, st->units_c ? "\xC2\xB0" "C" : "\xC2\xB0" "F");
     lv_label_set_text(s_val_haptics, st->haptics_enabled ? "On" : "Off");
 
-    // While a brightness row is being edited its label already shows the live
-    // (not-yet-persisted) candidate value — see bri_set_val_label — so a
-    // state re-render here (some unrelated store commit landing mid-edit)
-    // must not stomp it with the still-old value still sitting in the store.
+    // Plain read of the last-committed value — SCR_BRIGHTNESS owns the live
+    // preview and the actual commit; this row just mirrors app_state_t.
     char buf[8];
-    if (s_bri_edit != BRI_EDIT_DAY) {
-        snprintf(buf, sizeof buf, "%u%%", (unsigned)st->bri_day_pct);
-        lv_label_set_text(s_val_bri_day, buf);
-    }
-    if (s_bri_edit != BRI_EDIT_NIGHT) {
-        snprintf(buf, sizeof buf, "%u%%", (unsigned)st->bri_night_pct);
-        lv_label_set_text(s_val_bri_night, buf);
-    }
+    snprintf(buf, sizeof buf, "%u%%", (unsigned)st->bri_day_pct);
+    lv_label_set_text(s_val_bri_day, buf);
+    snprintf(buf, sizeof buf, "%u%%", (unsigned)st->bri_night_pct);
+    lv_label_set_text(s_val_bri_night, buf);
 }
 
 // The knob walks the focused row (one per detent, dial_list's rotor snap) —
-// unless a brightness row is being edited, in which case it drives that row's
-// percent instead (+-10%/detent, clamped 10..100, live-previewed).
+// nothing on this screen is itself an adjustable control anymore (brightness
+// moved to its own full-screen SCR_BRIGHTNESS picker).
 static bool on_knob(int detents)
 {
     if (!s_list || detents == 0) return false;
-
-    if (s_bri_edit != BRI_EDIT_NONE) {
-        int pct = (int)s_bri_pct + detents * BRI_STEP_PCT;
-        if (pct < 10)  pct = 10;
-        if (pct > 100) pct = 100;
-        s_bri_edit_at_ms = lv_tick_get();   // any detent resets the 5s idle window
-        if (pct == (int)s_bri_pct) {
-            dial_haptics_play(HAPTIC_STOP);   // clamped at a range end
-            return true;
-        }
-        s_bri_pct = (uint8_t)pct;
-        dial_power_preview(s_bri_edit == BRI_EDIT_NIGHT, s_bri_pct);
-        bri_set_val_label();
-        dial_haptics_play(HAPTIC_TICK);
-        return true;
-    }
-
     int r = dial_list_knob(s_list, detents);
     if (r) dial_haptics_play(r > 0 ? HAPTIC_TICK : HAPTIC_STOP);
     return true;

@@ -31,6 +31,14 @@ typedef struct {
     char latest[16];       // "X.Y.Z" from the release tag, once known
     int  progress_pct;     // 0-100, meaningful while OTA_DOWNLOADING
     char err[96];          // last failure, human-readable
+    // True from dial_ota_init() (captured once at boot) until
+    // dial_ota_mark_valid_if_pending() actually confirms the image -- i.e.
+    // this boot is a fresh OTA install the bootloader will silently roll
+    // back on the next reset/power-cycle unless it survives to confirm. The
+    // worker mirrors this into app_state_t so scr_connecting/scr_dial can
+    // warn the user not to unplug during that window (see main.c's field
+    // incident writeup near ota_confirm_once()).
+    bool pending_verify;
 } dial_ota_info_t;
 
 // Snapshot the current status under the internal lock. Safe from any task.
@@ -62,9 +70,19 @@ bool dial_ota_download_and_apply(void (*progress_cb)(int pct));
 // silent no-op. Worker task only (same discipline as dial_ota_check()).
 void dial_ota_set_blocked(const char *reason);
 
-// Call once after a healthy boot (the worker's "device linked" moment): if
-// the running image is still ESP_OTA_IMG_PENDING_VERIFY (booted straight
-// from an OTA install, rollback armed), mark it valid so the bootloader
-// stops treating it as provisional. A no-op (just a log line) on a normal,
-// non-OTA boot.
+// Call once after a healthy boot (the worker's "device linked" moment, or a
+// 30s stable-boot fallback timer -- see main.c): if the running image is
+// still ESP_OTA_IMG_PENDING_VERIFY (booted straight from an OTA install,
+// rollback armed), mark it valid so the bootloader stops treating it as
+// provisional, and clears info.pending_verify. A no-op (just a log line) on
+// a normal, non-OTA boot.
 void dial_ota_mark_valid_if_pending(void);
+
+// Call once, very early in app_main (before Wi-Fi/UI first paint): captures
+// whether this boot is currently ESP_OTA_IMG_PENDING_VERIFY into
+// info.pending_verify, WITHOUT marking anything valid. This exists
+// separately from dial_ota_mark_valid_if_pending() because the UI needs to
+// know "you're on probation" from the very first rendered frame -- long
+// before the worker reaches a healthy poll or the 30s confirm timer fires --
+// so the pending-verify warning can actually be seen before it's resolved.
+void dial_ota_init(void);

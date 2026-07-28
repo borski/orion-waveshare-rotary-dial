@@ -25,6 +25,7 @@
 #include "ui_screens.h"
 #include "dial_state.h"
 #include "dial_palette.h"
+#include "dial_ota.h"
 #include "sim_state.h"
 
 #define STB_IMAGE_WRITE_IMPLEMENTATION
@@ -397,11 +398,24 @@ static void scenario_tonight_relative(void)
     snapshot("tonight-relative");
 }
 
+// Also documents the M6 "Install X.Y.Z" row (menu discoverability for the
+// update control that used to live only in About): sets the OTA status to
+// available with a pending version before navigating, then knob-walks focus
+// down onto the new row itself (Back/Tonight/Settings/Wi-Fi/About/Install —
+// 4 detents past the "Tonight" the list opens on) so menu.png actually shows
+// the row it's meant to document, not just proves it doesn't crash off-frame.
 static void scenario_menu(void)
 {
     apply_baseline();
+    app_state_t *st = sim_state_ptr();
+    st->ota.status = OTA_AVAILABLE;
+    snprintf(st->ota.latest, sizeof(st->ota.latest), "1.0.10");
+    st->generation++;
     ui_router_go(SCR_MENU, NULL, LV_SCR_LOAD_ANIM_NONE);
     pump_ms(300);
+    sim_knob(4);           // Tonight -> Install 1.0.10
+    pump_ms(300);
+    pump_until_idle(800);  // rotor snap is an lv_anim; land before the capture
     snapshot("menu");
 }
 
@@ -413,25 +427,19 @@ static void scenario_settings(void)
     snapshot("settings");
 }
 
-// The Night-brightness row mid-edit — the value a bedside user most wants to
-// tune: rotor-walked down to the row, tapped into edit mode (knob now drives
-// the percent, row accented, live backlight preview on real hardware), then
-// dialed to 80% so the render shows the edit state with a deliberately chosen
-// value instead of the untouched 100% default. The Day row stays visible
-// above it at 100%, so one frame shows both rows plus the edit treatment.
+// The full-screen SCR_BRIGHTNESS picker (replaces the old inline settings-row
+// edit — see scr_brightness.c) opened on the Night row, then knob-adjusted
+// down from the 100% default to 80% so the render shows a deliberately
+// chosen value instead of just the untouched opening state — same idiom
+// scenario_boost uses for its own picker.
 static void scenario_settings_brightness(void)
 {
     apply_baseline();
-    ui_router_go(SCR_SETTINGS, NULL, LV_SCR_LOAD_ANIM_NONE);
+    ui_router_go(SCR_BRIGHTNESS, (void *)(uintptr_t)1 /* night */, LV_SCR_LOAD_ANIM_NONE);
     pump_ms(300);
-    sim_knob(5);          // list opens focused past Back -> lands on Night brightness
-    pump_ms(400);
-    pump_until_idle(800); // rotor snap is an lv_anim; land before tapping
-    sim_tap(180, 180);    // focused row sits snap-centered at mid-screen
+    sim_knob(-2);   // 100% -> 80%
     pump_ms(300);
-    sim_knob(-2);         // 100% -> 80%
-    pump_ms(300);
-    snapshot("settings-brightness");
+    snapshot("brightness");
 }
 
 static void scenario_wifi_info(void)

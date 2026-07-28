@@ -276,6 +276,14 @@ typedef struct {
         char latest[16];
         int  progress_pct;
         char err[96];
+        // Mirrors dial_ota_info_t.pending_verify -- true while this boot is
+        // still ESP_OTA_IMG_PENDING_VERIFY (a fresh OTA install the
+        // bootloader will roll back on the next reset/power-cycle unless it
+        // survives to confirm). bool needs no int-cast trick like `status`
+        // above: it's a plain stdbool.h type on both sides, not an enum
+        // defined in dial_ota.h. Drives scr_connecting's/scr_dial's
+        // "Finalizing update -- keep powered" notice.
+        bool pending_verify;
     } ota;
 
     // Bumped on every commit; the UI dispatcher re-renders when it changes.

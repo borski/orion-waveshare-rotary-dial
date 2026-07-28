@@ -100,6 +100,20 @@ static void on_state(const app_state_t *st)
     }
     default:                   main_txt = "..."; break;
     }
+    // Pending-verify notice: this boot is a fresh OTA install the bootloader
+    // will roll back on the next power-cycle unless it survives long enough
+    // to confirm (main.c's ota_confirm_once(), either the first successful
+    // poll or a 30s fallback timer). This is exactly the screen a user stares
+    // at right after that reboot, so it's the one place this warning matters
+    // most. Appended (not on PH_DEGRADED — that branch above already owns its
+    // own honest headline/subtitle and this must not disturb it) rather than
+    // replacing whatever the phase already says, since "Connecting to
+    // Wi-Fi..." / the SSID / "Reconnecting..." are still true and useful.
+    if (st->phase != PH_DEGRADED && st->ota.pending_verify) {
+        size_t len = strlen(sub_txt);
+        snprintf(sub_txt + len, sizeof(sub_txt) - len, "%sFinalizing update - keep powered",
+                 len ? "\n" : "");
+    }
     lv_obj_set_style_text_color(s_label, main_color, 0);
     lv_label_set_text(s_label, main_txt);
     lv_label_set_text(s_sub, sub_txt);

@@ -276,6 +276,22 @@ bool dial_ota_download_and_apply(void (*progress_cb)(int pct))
 
 /* ---- rollback health check ----------------------------------------------*/
 
+void dial_ota_init(void)
+{
+    const esp_partition_t *running = esp_ota_get_running_partition();
+    esp_ota_img_states_t ota_state;
+    bool pending = false;
+    if (esp_ota_get_state_partition(running, &ota_state) != ESP_OK) {
+        ESP_LOGW(TAG, "esp_ota_get_state_partition failed at boot; assuming not pending");
+    } else {
+        pending = (ota_state == ESP_OTA_IMG_PENDING_VERIFY);
+    }
+    taskENTER_CRITICAL(&s_mux);
+    s_info.pending_verify = pending;
+    taskEXIT_CRITICAL(&s_mux);
+    ESP_LOGI(TAG, "boot pending-verify: %s", pending ? "true (rollback armed)" : "false");
+}
+
 void dial_ota_mark_valid_if_pending(void)
 {
     const esp_partition_t *running = esp_ota_get_running_partition();
@@ -290,6 +306,13 @@ void dial_ota_mark_valid_if_pending(void)
     }
     if (esp_ota_mark_app_valid_cancel_rollback() == ESP_OK) {
         ESP_LOGI(TAG, "app marked valid; rollback cancelled");
+        // Clears the mirror so scr_connecting/scr_dial's "Finalizing update"
+        // notice drops as soon as the caller (main.c) re-commits the OTA
+        // snapshot -- pending_verify must never stay true once the
+        // bootloader has actually stopped tracking a rollback.
+        taskENTER_CRITICAL(&s_mux);
+        s_info.pending_verify = false;
+        taskEXIT_CRITICAL(&s_mux);
     } else {
         ESP_LOGE(TAG, "failed to mark app valid / cancel rollback");
     }
