@@ -68,6 +68,14 @@ void dial_oauth_stop_authorize(void);
 // The most recent token-endpoint error (HTTP status + body snippet), for display.
 const char *dial_oauth_last_error(void);
 
+// Drop this component's kept-alive connection. The dial talks to one host,
+// and only one connection to it is ever wanted at a time: hold the token
+// endpoint's socket open and the MCP client's own connection can be refused
+// (field incident 2026-07-28 — oauth refreshed happily while every MCP
+// handshake was RST). Call this after finishing a token operation, before
+// handing the network back to dial_mcp.
+void dial_oauth_release_connection(void);
+
 // True if the LAST HTTP call this component made (discovery, registration, or
 // a token-endpoint request) failed TLS certificate verification -- nonzero
 // mbedtls verify flags on the transport -- rather than a routine network/HTTP

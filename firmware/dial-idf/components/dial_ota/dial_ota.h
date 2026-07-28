@@ -1,5 +1,6 @@
 #pragma once
 #include <stdbool.h>
+#include <stdint.h>
 
 /*
  * Firmware updates from GitHub Releases (M6): the version check hits the
@@ -69,6 +70,23 @@ bool dial_ota_download_and_apply(void (*progress_cb)(int pct));
 // chains) but still owes the Settings row a clear reason instead of a
 // silent no-op. Worker task only (same discipline as dial_ota_check()).
 void dial_ota_set_blocked(const char *reason);
+
+// OTA_FAILED must not be a terminal state -- a stale check/download failure
+// (or a blocked-check reason) must not wedge the Settings row, or any other
+// reader of dial_ota_get()/app_state_t.ota, forever (field bug: it used to
+// take a manual power cycle to clear). No-op unless status is currently
+// OTA_FAILED AND at least max_age_us has elapsed since it became so; when it
+// does apply, reverts to OTA_IDLE (clearing .err) and returns true. Two
+// callers, both worker task only (same discipline as the rest of this
+// file's mutators -- the caller is responsible for re-committing the
+// app_state_t mirror, e.g. via main.c's commit_ota_snapshot(), when this
+// returns true):
+//  - main.c's idle loop, periodically, with a real max_age_us -- the
+//    time-based "don't stay wedged for minutes" rule.
+//  - main.c's CMD_OTA_CLEAR_FAILED handler, with max_age_us=0 -- fired from
+//    scr_settings.c's screen teardown, so a fresh visit to Settings never
+//    shows a failure left over from a prior visit.
+bool dial_ota_clear_stale_failure(int64_t max_age_us);
 
 // Call once after a healthy boot (the worker's "device linked" moment, or a
 // 30s stable-boot fallback timer -- see main.c): if the running image is

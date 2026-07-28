@@ -74,6 +74,12 @@ static const char *TAG = "app";
 // — see the gating comment at its call site for the full safe-window rule.
 #define OTA_AUTOCHECK_INTERVAL_US (24LL * 60 * 60 * 1000000)
 
+// OTA_FAILED is not allowed to be terminal (field bug: it used to stay
+// wedged until a manual power cycle) — see dial_ota_clear_stale_failure()'s
+// comment. This is the time-based half of that fix; CMD_OTA_CLEAR_FAILED
+// (scr_settings.c's screen teardown) is the immediate half.
+#define OTA_FAILED_AUTOCLEAR_US (25LL * 1000000)
+
 #define BACKOFF_MIN_S  5
 #define BACKOFF_MAX_S 60
 
@@ -87,8 +93,13 @@ static const char *TAG = "app";
 // before treating it as a real outage. Without this, a freshly flashed dial fell
 // into the steady-state "Orion unreachable" 5->60s backoff and made the user sit
 // through several retry cycles before the QR appeared.
-#define PREP_FAST_RETRIES 6      // fast attempts before falling to slow backoff
-#define PREP_RETRY_MS  1500      // ~9s total fast-retry window (6 x 1.5s)
+#define PREP_FAST_RETRIES 3      // fast attempts before falling to slow backoff
+// 5s, not the old 1.5s: rapid fresh TLS connections are exactly what home-
+// router flood protection rate-limits per device (field incident 2026-07-28
+// — the dial's own retry pace kept the throttle tripped for hours). Still
+// covers the boot-time SNTP race the fast window exists for, at a cadence
+// that reads as a polite client instead of an attack.
+#define PREP_RETRY_MS  5000
 
 static const char *zone_id_str(zone_idx_t z) { return z == ZONE_A ? "zone_a" : "zone_b"; }
 
@@ -238,6 +249,18 @@ static screen_id_t nav_policy(const app_state_t *st, void **arg)
                 return SCR_SIDEPICK;
             *arg = (void *)(uintptr_t)st->ui_zone;
             return dial_power_level() == DPWR_STANDBY ? SCR_STANDBY : SCR_DIAL;
+        }
+        // Never trap the user (field incident 2026-07-28): with no device
+        // state the connect/error screen used to own the display outright,
+        // making Settings' Re-link, Wi-Fi change, and About's update —
+        // the only tools that FIX a stuck dial — unreachable. A deliberately
+        // opened menu face or sub-screen stays put; scr_connecting offers
+        // the swipe that gets there.
+        {
+            screen_id_t cur = ui_router_current();
+            if (cur == SCR_MENU || cur == SCR_SETTINGS || cur == SCR_ABOUT ||
+                cur == SCR_WIFI || cur == SCR_TONIGHT || cur == SCR_BRIGHTNESS)
+                return cur;
         }
         return st->phase == PH_READY ? SCR_CONNECTING : SCR_ERROR;
     default:                    return SCR_CONNECTING;
@@ -1002,6 +1025,7 @@ static bool with_auth_retry(bool (*call)(void *), void *arg,
     if (call(arg)) { s_perm_refresh_failures = 0; return true; }
     if (dial_oauth_refresh(disc, client_id)) {
         s_perm_refresh_failures = 0;
+        dial_oauth_release_connection();   // one connection to the host at a time
         dial_mcp_connect(NULL);
         return call(arg);
     }
@@ -1147,6 +1171,13 @@ static void handle_immediate_cmd(const app_cmd_t *cmd, const oauth_disc_t *disc,
         }
         break;
     }
+    // scr_settings.c posts this from destroy() (screen teardown) so a FAILED
+    // row never survives to the next visit — see dial_ota_clear_stale_failure()'s
+    // comment. max_age_us=0: clear immediately regardless of how recently it
+    // failed. A no-op (no commit) if status already moved off OTA_FAILED.
+    case CMD_OTA_CLEAR_FAILED:
+        if (dial_ota_clear_stale_failure(0)) commit_ota_snapshot();
+        break;
     default:
         break;   // CMD_SET_TEMP/CMD_TOGGLE_ON never reach here (see the drain loop)
     }
@@ -1244,6 +1275,7 @@ static void worker_task(void *arg)
         }
 
         dial_state_set_phase(PH_MCP_CONNECTING, NULL);
+        dial_oauth_release_connection();   // one connection to the host at a time
         bool linked = dial_mcp_connect(NULL) && orion_discover_device();
         // A bare, well-formed empty device list is an account problem, not a
         // token problem — skip the refresh/re-link dance below and go
@@ -1450,6 +1482,15 @@ static void worker_task(void *arg)
             with_auth_retry(sched_call, NULL, &disc, client_id);   // commits inside on success
             last_sched_us = esp_timer_get_time();
         }
+
+        // OTA_FAILED must not be terminal (field bug: it used to stay wedged
+        // showing "Update failed" until a manual power cycle — see
+        // dial_ota_clear_stale_failure()'s comment). Re-checked at this same
+        // idle cadence; a no-op the vast majority of ticks (status isn't
+        // FAILED, or it's not stale yet) so it's cheap to leave ungated.
+        // This is the belt to CMD_OTA_CLEAR_FAILED's suspenders: it's what
+        // un-wedges the row even if the user never leaves Settings at all.
+        if (dial_ota_clear_stale_failure(OTA_FAILED_AUTOCLEAR_US)) commit_ota_snapshot();
 
         // Auto-check for firmware updates (M6): at most once per uptime-day,
         // and only CHECKS (never applies) -- the settings row just gets a

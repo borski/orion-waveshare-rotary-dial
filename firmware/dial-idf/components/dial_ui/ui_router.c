@@ -78,10 +78,31 @@ void ui_router_go(screen_id_t id, void *arg, lv_scr_load_anim_t anim)
     configASSERT(id < SCR_COUNT && s_screens[id]);
     if (id == s_current && arg == s_current_arg) return;
 
+    // lv_scr_load_anim's auto_del frees the OLD screen only when the load
+    // animation completes; a second animated load starting inside that window
+    // orphans the first old screen (LVGL never deletes it). A connect-fail
+    // loop can flap phases faster than the 220ms animation for hours, leaking
+    // a screen per flap until lv_obj_create() below returns NULL and the
+    // load path dereferences it (field incident: LoadProhibited @0x20 in
+    // lv_scr_load_anim). Forcing NONE (synchronous delete) whenever the
+    // previous animated load could still be in flight closes the leak.
+    static uint32_t s_last_anim_ms;
+    if (anim != LV_SCR_LOAD_ANIM_NONE) {
+        if (lv_tick_elaps(s_last_anim_ms) < 400) anim = LV_SCR_LOAD_ANIM_NONE;
+        else s_last_anim_ms = lv_tick_get();
+    }
+
     const ui_screen_t *old = (s_current < SCR_COUNT) ? s_screens[s_current] : NULL;
     if (old && old->destroy) old->destroy();
 
     lv_obj_t *scr = lv_obj_create(NULL);
+    if (!scr) {
+        // Out of LVGL heap — nothing sane to render. Skip the navigation
+        // rather than crash; the next dispatch tick retries.
+        LV_LOG_ERROR("ui_router: lv_obj_create failed, skipping nav");
+        s_current = SCR_COUNT;   // force a rebuild on the next tick
+        return;
+    }
     lv_obj_clear_flag(scr, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_add_event_cb(scr, gesture_cb, LV_EVENT_GESTURE, NULL);
     s_current = id;

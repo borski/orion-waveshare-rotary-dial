@@ -71,10 +71,21 @@ typedef struct { char *buf; int len; int cap; } resp_t;
 // request it describes). See dial_oauth_last_err_cert().
 static bool s_last_err_cert;
 
+// One persistent keep-alive handle for ALL of this component's requests
+// (discovery, DCR, token), exactly like dial_mcp's s_http. Field incident
+// 2026-07-28: opening a fresh TLS connection per request, retried every few
+// seconds, tripped a per-device new-connection rate limit (home-router flood
+// protection) that then chopped every later handshake in the burst — the
+// dial could reach the MCP endpoint (one reused connection) but never its
+// own token endpoint. One reused connection per component keeps the dial's
+// handshake rate at "polite client" levels no matter how long it retries.
+static esp_http_client_handle_t s_http;
+static resp_t *s_resp;   // per-call sink for on_http (single worker task)
+
 static esp_err_t on_http(esp_http_client_event_t *e)
 {
-    if (e->event_id == HTTP_EVENT_ON_DATA && e->data_len > 0) {
-        resp_t *r = e->user_data;
+    if (e->event_id == HTTP_EVENT_ON_DATA && e->data_len > 0 && s_resp) {
+        resp_t *r = s_resp;
         if (r->len + e->data_len + 1 > r->cap) {
             r->cap = (r->len + e->data_len) * 2 + 512;
             r->buf = realloc(r->buf, r->cap);
@@ -88,39 +99,71 @@ static esp_err_t on_http(esp_http_client_event_t *e)
     return ESP_OK;
 }
 
-// Perform an HTTP request. body_in/content_type NULL for GET. Returns HTTP
-// status (or -1); *body_out is a malloc'd, NUL-terminated body (caller frees).
+static void http_reset(void)
+{
+    if (s_http) { esp_http_client_cleanup(s_http); s_http = NULL; }
+}
+
+// Perform an HTTP request on the shared keep-alive handle. body_in/
+// content_type NULL for GET. Returns HTTP status (or -1); *body_out is a
+// malloc'd, NUL-terminated body (caller frees).
 static int http_do(const char *url, esp_http_client_method_t method,
                    const char *content_type, const char *body_in, char **body_out)
 {
     resp_t r = { 0 };
-    esp_http_client_config_t cfg = {
-        .url = url,
-        .event_handler = on_http,
-        .user_data = &r,
-        .cert_pem = orion_root_ca_pem_start,   // verify against Orion's embedded roots
-        .timeout_ms = 15000,
-    };
-    esp_http_client_handle_t c = esp_http_client_init(&cfg);
-    esp_http_client_set_method(c, method);
-    esp_http_client_set_header(c, "Accept", "application/json");
-    if (content_type) esp_http_client_set_header(c, "Content-Type", content_type);
-    if (body_in) esp_http_client_set_post_field(c, body_in, strlen(body_in));
+    s_resp = &r;
 
-    esp_err_t err = esp_http_client_perform(c);
-    int status = (err == ESP_OK) ? esp_http_client_get_status_code(c) : -1;
-    if (err != ESP_OK) ESP_LOGW(TAG, "%s: %s", url, esp_err_to_name(err));
+    // One transparent retry on a fresh connection: a kept-alive socket the
+    // server quietly closed fails its first reuse — same workaround
+    // dial_mcp's http_send carries, not a general retry loop.
+    esp_err_t err = ESP_FAIL;
+    for (int attempt = 0; attempt < 2; attempt++) {
+        if (!s_http) {
+            esp_http_client_config_t cfg = {
+                .url = url,
+                .event_handler = on_http,
+                .cert_pem = orion_root_ca_pem_start,   // verify against Orion's embedded roots
+                .timeout_ms = 15000,
+                .keep_alive_enable = true,
+            };
+            s_http = esp_http_client_init(&cfg);
+            if (!s_http) { s_resp = NULL; *body_out = NULL; return -1; }
+        } else {
+            esp_http_client_set_url(s_http, url);
+        }
+        esp_http_client_set_method(s_http, method);
+        esp_http_client_set_header(s_http, "Accept", "application/json");
+        // Headers and the POST body PERSIST on a reused handle: clear both
+        // explicitly on requests that don't carry them, or a GET after a
+        // token POST replays the old body.
+        if (content_type) esp_http_client_set_header(s_http, "Content-Type", content_type);
+        else              esp_http_client_delete_header(s_http, "Content-Type");
+        esp_http_client_set_post_field(s_http, body_in, body_in ? strlen(body_in) : 0);
 
-    // Nonzero verify flags (MBEDTLS_X509_BADCERT_NOT_TRUSTED/EXPIRED/...) mean
-    // the handshake failed because our embedded trust anchors don't vouch for
-    // whatever cert the server presented -- worth telling apart from a plain
-    // network outage. Cleared on every call (success included) so a stale
-    // flag from an earlier request can never leak into this one's result.
-    int tls_code = 0, tls_flags = 0;
-    esp_http_client_get_and_clear_last_tls_error(c, &tls_code, &tls_flags);
-    s_last_err_cert = tls_flags != 0;
+        err = esp_http_client_perform(s_http);
+        if (err == ESP_OK) break;
+        ESP_LOGW(TAG, "%s: %s%s", url, esp_err_to_name(err),
+                 attempt == 0 ? " (retrying on a fresh connection)" : "");
+        // Salvage the TLS detail BEFORE dropping the handle (cert check below).
+        int tc = 0, tf = 0;
+        esp_http_client_get_and_clear_last_tls_error(s_http, &tc, &tf);
+        s_last_err_cert = tf != 0;
+        http_reset();
+        free(r.buf); r = (resp_t){ 0 };   // don't glue two attempts' bodies together
+    }
 
-    esp_http_client_cleanup(c);
+    int status = (err == ESP_OK) ? esp_http_client_get_status_code(s_http) : -1;
+    if (err == ESP_OK) {
+        // Nonzero verify flags (MBEDTLS_X509_BADCERT_NOT_TRUSTED/EXPIRED/...)
+        // mean the handshake failed because our embedded trust anchors don't
+        // vouch for the server's cert — worth telling apart from a plain
+        // outage. Cleared every call so a stale flag never leaks forward.
+        int tls_code = 0, tls_flags = 0;
+        esp_http_client_get_and_clear_last_tls_error(s_http, &tls_code, &tls_flags);
+        s_last_err_cert = tls_flags != 0;
+    }
+
+    s_resp = NULL;
     *body_out = r.buf;
     return status;
 }
@@ -507,3 +550,5 @@ const char *dial_oauth_last_error(void) { return s_token_err; }
 bool dial_oauth_last_token_err_permanent(void) { return s_token_err_permanent; }
 
 bool dial_oauth_last_err_cert(void) { return s_last_err_cert; }
+
+void dial_oauth_release_connection(void) { http_reset(); }

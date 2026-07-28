@@ -114,11 +114,30 @@ static void on_state(const app_state_t *st)
         snprintf(sub_txt + len, sizeof(sub_txt) - len, "%sFinalizing update - keep powered",
                  len ? "\n" : "");
     }
+    // Degraded is where a user might be stuck for a while: point at the
+    // menu escape hatch (nav_policy keeps a deliberately opened menu/
+    // settings/about sticky even without device state) so Re-link, Wi-Fi
+    // change, and software update are always reachable from a sick dial.
+    if (st->phase == PH_DEGRADED) {
+        size_t len = strlen(sub_txt);
+        snprintf(sub_txt + len, sizeof(sub_txt) - len, "%sSwipe left for menu",
+                 len ? "\n" : "");
+    }
     lv_obj_set_style_text_color(s_label, main_color, 0);
     lv_label_set_text(s_label, main_txt);
     lv_label_set_text(s_sub, sub_txt);
 }
 
+// The escape hatch itself: a horizontal swipe (same gesture that walks faces
+// on a healthy dial) opens the menu even while connecting/degraded.
+static bool on_gesture(lv_dir_t dir)
+{
+    if (dir != LV_DIR_LEFT && dir != LV_DIR_RIGHT) return false;
+    ui_router_go(SCR_MENU, NULL, LV_SCR_LOAD_ANIM_MOVE_LEFT);
+    return true;
+}
+
 const ui_screen_t scr_connecting = {
     .create = create, .destroy = destroy, .on_state = on_state,
+    .on_gesture = on_gesture,
 };

@@ -431,6 +431,14 @@ typedef enum {
     CMD_OTA_APPLY,       // -> dial_ota_download_and_apply() + reboot on
                          // success; worker drops this unless ota.status is
                          // already OTA_AVAILABLE (stale-tap guard)
+    // Posted by scr_settings.c's destroy() (screen teardown) so a FAILED
+    // Software update row never survives to the next visit -- OTA_FAILED
+    // isn't allowed to be terminal (field bug: it used to stay wedged until
+    // a manual power cycle). -> dial_ota_clear_stale_failure(0); zone/a/b
+    // unused. A no-op if status has already moved off OTA_FAILED. See also
+    // main.c's periodic idle-loop call for the time-based ~25s auto-clear
+    // that covers the case where the user never leaves the screen at all.
+    CMD_OTA_CLEAR_FAILED,
 } cmd_kind_t;
 
 typedef struct {

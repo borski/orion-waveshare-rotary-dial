@@ -10,6 +10,7 @@
 #include "freertos/FreeRTOS.h"
 #include "esp_log.h"
 #include "esp_err.h"
+#include "esp_timer.h"
 #include "esp_app_desc.h"
 #include "esp_http_client.h"
 #include "esp_https_ota.h"
@@ -31,6 +32,10 @@ static const char *TAG = "ota";
 static portMUX_TYPE       s_mux = portMUX_INITIALIZER_UNLOCKED;
 static dial_ota_info_t    s_info;
 static char               s_asset_url[300];   // captured by dial_ota_check()
+// esp_timer_get_time() at the moment s_info.status last became OTA_FAILED --
+// dial_ota_clear_stale_failure()'s clock. Only meaningful while status ==
+// OTA_FAILED; never read otherwise.
+static int64_t             s_failed_at_us;
 
 void dial_ota_get(dial_ota_info_t *out)
 {
@@ -41,12 +46,28 @@ void dial_ota_get(dial_ota_info_t *out)
 
 static void set_status(dial_ota_status_t status, const char *latest, const char *err)
 {
+    int64_t now = esp_timer_get_time();
     taskENTER_CRITICAL(&s_mux);
     s_info.status = status;
+    if (status == OTA_FAILED) s_failed_at_us = now;
     if (latest) strlcpy(s_info.latest, latest, sizeof(s_info.latest));
     if (err)    strlcpy(s_info.err, err, sizeof(s_info.err));
     else        s_info.err[0] = 0;
     taskEXIT_CRITICAL(&s_mux);
+}
+
+bool dial_ota_clear_stale_failure(int64_t max_age_us)
+{
+    int64_t now = esp_timer_get_time();
+    bool cleared = false;
+    taskENTER_CRITICAL(&s_mux);
+    if (s_info.status == OTA_FAILED && (now - s_failed_at_us) >= max_age_us) {
+        s_info.status = OTA_IDLE;
+        s_info.err[0] = 0;
+        cleared = true;
+    }
+    taskEXIT_CRITICAL(&s_mux);
+    return cleared;
 }
 
 static void set_progress(int pct)

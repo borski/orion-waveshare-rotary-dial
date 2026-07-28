@@ -115,7 +115,13 @@ static bool http_open(void)
         .event_handler     = on_http,
         .cert_pem          = dial_oauth_root_ca(),
         .timeout_ms        = 20000,
-        .buffer_size       = 2048,
+        // NO buffer_size override (field incident 2026-07-28): esp-tls sizes
+        // the TLS max-fragment-length extension from it, and a security
+        // middlebox was observed admitting dial_oauth's default-sized
+        // ClientHello while RST-ing this component's 2048-byte one from the
+        // same device in the same second. Default buffers make the two
+        // components' handshakes indistinguishable — responses still arrive
+        // in full via the ON_DATA event stream, exactly like dial_oauth's.
         .keep_alive_enable = true,     // the whole point: one TLS handshake, many calls
     };
     s_http = esp_http_client_init(&cfg);
@@ -188,6 +194,14 @@ static cJSON *rpc(const char *method, cJSON *params, bool notification, bool *ok
         free(r.buf);
         r = (mcp_resp_t){ 0 };
         s_active = &r;
+        // Breathe before the second attempt (field incident 2026-07-28):
+        // router flood protection was observed RST-ing the FIRST connection
+        // after an idle gap while admitting a follow-up ~1s later — an
+        // immediate retry (the old behavior, 90-400ms) lands inside the same
+        // penalty and fails identically, forever. One second costs nothing
+        // on this path (we're already in the failure lane) and turns that
+        // filter from a hard wall into a one-retry inconvenience.
+        vTaskDelay(pdMS_TO_TICKS(1000));
         err = http_send(method, auth, body);
     }
     int status = (err == ESP_OK) ? esp_http_client_get_status_code(s_http) : -1;

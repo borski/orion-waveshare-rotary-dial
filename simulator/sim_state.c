@@ -144,6 +144,7 @@ void dial_cmd_post(const app_cmd_t *cmd)
         "SET_TEMP", "TOGGLE_ON", "BOOST_START", "BOOST_CANCEL", "BED_OFF",
         "AWAY", "MATCH_PARTNER", "TONIGHT_OVERRIDE", "TONIGHT_REVERT",
         "RELINK", "WIFI_RESET", "FACTORY_RESET", "OTA_CHECK", "OTA_APPLY",
+        "OTA_CLEAR_FAILED",
     };
     const char *k = (cmd->kind >= 0 && (size_t)cmd->kind < sizeof(KIND) / sizeof(KIND[0]))
                         ? KIND[cmd->kind] : "?";

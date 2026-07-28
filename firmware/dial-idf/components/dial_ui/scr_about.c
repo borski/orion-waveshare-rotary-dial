@@ -292,6 +292,19 @@ static void create(lv_obj_t *scr, void *arg)
 
 static void destroy(void)
 {
+    // Backing out of this screen clears a failed check (owner-reported: a
+    // "check failed (HTTP -1)" used to sit here until a power cycle, and
+    // leaving the screen is exactly when a user expects it gone). The worker
+    // also ages FAILED out on its own — see OTA_FAILED_AUTOCLEAR_US — so this
+    // is the immediate half of that fix, not its only half.
+    {
+        app_state_t st;
+        dial_state_get(&st);
+        if ((dial_ota_status_t)st.ota.status == OTA_FAILED) {
+            app_cmd_t cmd = { .kind = CMD_OTA_CLEAR_FAILED };
+            dial_cmd_post(&cmd);
+        }
+    }
     if (s_confirm_timer) { lv_timer_del(s_confirm_timer); s_confirm_timer = NULL; }
     s_title_lbl = NULL;
     s_list = NULL;

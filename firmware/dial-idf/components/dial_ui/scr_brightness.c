@@ -151,7 +151,13 @@ static void create(lv_obj_t *scr, void *arg)
     s_title_lbl = lv_label_create(scr);
     lv_obj_set_style_text_font(s_title_lbl, &lv_font_montserrat_16, 0);
     lv_label_set_text(s_title_lbl, s_night ? "NIGHT BRIGHTNESS" : "DAY BRIGHTNESS");
-    lv_obj_align(s_title_lbl, LV_ALIGN_CENTER, 0, 64 - CY);
+    // 84, not scr_boost's 64: this caption is nearly twice as wide as
+    // "BOOST HEAT", and the arc's inner edge (r=149) leaves only ~159px of
+    // chord at y=54 (a 16px-font line's top edge there) — "NIGHT BRIGHTNESS"
+    // measures ~155px, so its corners nearly touched the stroke. 20px lower
+    // the chord opens to ~209px, restoring a comfortable margin on both
+    // sides without crowding the numeral below.
+    lv_obj_align(s_title_lbl, LV_ALIGN_CENTER, 0, 84 - CY);
 
     // Percent numeral — fixed anchor box, same slot as scr_boost's duration.
     s_num_box = lv_obj_create(scr);
