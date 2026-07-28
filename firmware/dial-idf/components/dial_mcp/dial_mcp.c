@@ -23,6 +23,9 @@ static const char *TAG = "mcp";
 static char s_session_id[128];
 static int  s_rpc_id;
 static char s_err[192];
+// Set at the end of every rpc() call (cleared on success). See
+// dial_mcp_last_err_cert().
+static bool s_err_cert;
 
 static void set_err(const char *fmt, ...)
 {
@@ -33,6 +36,8 @@ static void set_err(const char *fmt, ...)
 }
 
 const char *dial_mcp_last_error(void) { return s_err; }
+
+bool dial_mcp_last_err_cert(void) { return s_err_cert; }
 
 /* ---- HTTP with header capture ---------------------------------------- */
 
@@ -187,6 +192,16 @@ static cJSON *rpc(const char *method, cJSON *params, bool notification, bool *ok
     }
     int status = (err == ESP_OK) ? esp_http_client_get_status_code(s_http) : -1;
     ESP_LOGI(TAG, "%s: %d in %lld ms", method, status, (esp_timer_get_time() - t0) / 1000);
+
+    // Nonzero verify flags mean the handshake failed because our embedded
+    // trust anchors don't vouch for whatever cert the server presented now --
+    // worth telling apart from a plain network outage. Checked (and cleared)
+    // on every call, success included, so a stale flag from an earlier
+    // request can never leak into this one's result.
+    int tls_code = 0, tls_flags = 0;
+    if (s_http) esp_http_client_get_and_clear_last_tls_error(s_http, &tls_code, &tls_flags);
+    s_err_cert = tls_flags != 0;
+
     s_active = NULL;
     free(body);
 

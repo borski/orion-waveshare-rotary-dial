@@ -158,6 +158,26 @@ typedef struct {
     bool  sched_override_available;
 } zone_state_t;
 
+/*
+ * Honest, actionable phase_err text for a TLS certificate-verification
+ * failure (the device's embedded trust anchors are too old for whatever the
+ * server presents now) — this hardware can outlive its maintainer, so a
+ * stale anchor must not read as the same routine "Orion unreachable" outage
+ * as a Wi-Fi blip. dial_oauth/dial_mcp set this verbatim as the phase_err
+ * whenever their last_err_cert() getter is true; scr_connecting.c recognizes
+ * DIAL_CERT_ERR_TITLE as the first line and promotes it to the screen's
+ * headline instead of folding it into the usual retry subtitle.
+ *
+ * The repo line omits the "github.com/" host: at the error screen's sub
+ * label (300px @ lv_font_montserrat_16) the full URL measures ~400px and
+ * wraps awkwardly, while the bare "owner/repo" form fits on one line.
+ */
+#define DIAL_CERT_ERR_TITLE "Secure connection failed"
+#define DIAL_CERT_ERR_MSG \
+    DIAL_CERT_ERR_TITLE "\n" \
+    "This firmware may be too old\n" \
+    "chris023/orion-waveshare-rotary-dial"
+
 typedef struct {
     // Connection / lifecycle
     conn_phase_t phase;

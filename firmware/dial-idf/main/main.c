@@ -1176,7 +1176,11 @@ static void worker_task(void *arg)
                 vTaskDelay(pdMS_TO_TICKS(PREP_RETRY_MS));
                 continue;
             }
-            dial_state_set_phase(PH_DEGRADED, "Orion unreachable");
+            // A stale trust anchor fails right here (discovery is the first
+            // HTTPS call after Wi-Fi) — a device rebooting years from now must
+            // say so honestly instead of "Orion unreachable" (see DIAL_CERT_ERR_MSG).
+            dial_state_set_phase(PH_DEGRADED,
+                dial_oauth_last_err_cert() ? DIAL_CERT_ERR_MSG : "Orion unreachable");
             backoff_wait(backoff_s);
             backoff_s = (backoff_s * 2 > BACKOFF_MAX_S) ? BACKOFF_MAX_S : backoff_s * 2;
             continue;
@@ -1187,7 +1191,8 @@ static void worker_task(void *arg)
             // Interactive consent: QR on screen; on timeout, a fresh QR — no dead end.
             char url[600];
             if (!dial_oauth_start_authorize(&disc, client_id, redirect_uri, url, sizeof(url))) {
-                dial_state_set_phase(PH_DEGRADED, dial_oauth_last_error());
+                dial_state_set_phase(PH_DEGRADED,
+                    dial_oauth_last_err_cert() ? DIAL_CERT_ERR_MSG : dial_oauth_last_error());
                 backoff_wait(backoff_s);
                 continue;
             }
@@ -1235,7 +1240,7 @@ static void worker_task(void *arg)
         if (!linked) {
             dial_state_set_phase(PH_DEGRADED, s_no_orion_devices
                 ? "No Orion device on this account. Add your topper in the Orion app, then retry."
-                : dial_mcp_last_error());
+                : (dial_mcp_last_err_cert() ? DIAL_CERT_ERR_MSG : dial_mcp_last_error()));
             backoff_wait(backoff_s);
             backoff_s = (backoff_s * 2 > BACKOFF_MAX_S) ? BACKOFF_MAX_S : backoff_s * 2;
             continue;
@@ -1398,7 +1403,8 @@ static void worker_task(void *arg)
             dial_state_set_phase(PH_READY, NULL);
             ota_confirm_once();
         } else if (++poll_failures >= 3) {
-            dial_state_set_phase(PH_DEGRADED, dial_mcp_last_error());
+            dial_state_set_phase(PH_DEGRADED,
+                dial_mcp_last_err_cert() ? DIAL_CERT_ERR_MSG : dial_mcp_last_error());
         }
         last_poll_us = esp_timer_get_time();
 

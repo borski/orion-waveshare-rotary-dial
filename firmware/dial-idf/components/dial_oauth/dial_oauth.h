@@ -68,6 +68,14 @@ void dial_oauth_stop_authorize(void);
 // The most recent token-endpoint error (HTTP status + body snippet), for display.
 const char *dial_oauth_last_error(void);
 
+// True if the LAST HTTP call this component made (discovery, registration, or
+// a token-endpoint request) failed TLS certificate verification -- nonzero
+// mbedtls verify flags on the transport -- rather than a routine network/HTTP
+// problem. Distinct from dial_oauth_last_token_err_permanent (an OAuth-level
+// invalid_grant): this is transport-level and available even before any
+// token call. Signals the device's embedded trust anchors are likely stale.
+bool dial_oauth_last_err_cert(void);
+
 // True if the LAST token-endpoint failure (refresh or code exchange) was
 // PERMANENT: HTTP 400/401 with an OAuth "error":"invalid_grant" body (RFC
 // 6749 §5.2) -- the refresh token is dead and will never work again. False

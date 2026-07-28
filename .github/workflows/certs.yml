@@ -1,0 +1,101 @@
+# Trust-anchor sentinel: catches TLS breakage a year before the dials feel it.
+#
+# The firmware verifies every connection against the embedded anchors in
+# firmware/dial-idf/components/dial_oauth/orion_root_ca.pem. Two things can
+# silently rot that: a server migrating to a root we don't embed, and a
+# load-bearing anchor approaching its own expiry. Both only surface on the
+# devices, months or years later, as "my dial stopped working" — this job
+# surfaces them here instead, while there's still a year of runway to cut a
+# release (the fleet auto-updates within a day of one).
+#
+# NOTE: GitHub disables scheduled workflows after ~60 days without repository
+# activity. If this repo goes quiet, re-enable the schedule from the Actions
+# tab — or treat a quiet repo as reason to run this manually before any
+# maintenance release.
+name: cert-sentinel
+
+on:
+  schedule:
+    - cron: '17 6 1 * *'   # monthly, 1st at 06:17 UTC
+  workflow_dispatch:
+  push:
+    paths: ['firmware/dial-idf/components/dial_oauth/orion_root_ca.pem']
+  pull_request:
+    paths: ['firmware/dial-idf/components/dial_oauth/orion_root_ca.pem']
+
+jobs:
+  verify-trust-anchors:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Live chains verify against embedded anchors, with a year of runway
+        run: |
+          set -uo pipefail
+          PEM="$GITHUB_WORKSPACE/firmware/dial-idf/components/dial_oauth/orion_root_ca.pem"
+          FAIL=0
+          mkdir -p /tmp/sentinel && cd /tmp/sentinel
+
+          # Split the embedded anchors once; the per-host check and the final
+          # expiry inventory both walk these files. The n>=1 guard drops the
+          # PEM's comment header (everything before the first certificate),
+          # which would otherwise become a bogus anchor-00.pem.
+          awk '/BEGIN CERT/{n++} n>=1 {print > ("anchor-" sprintf("%02d",n) ".pem")}' "$PEM"
+
+          # Every host the firmware contacts: Orion MCP (control), GitHub API
+          # (OTA release check), GitHub objects CDN (OTA binary download).
+          for h in mcp.orionsleep.com api.github.com objects.githubusercontent.com; do
+            rm -f chain.pem cert-*.pem ints.pem
+            echo | openssl s_client -showcerts -connect "$h:443" -servername "$h" 2>/dev/null \
+              | awk '/BEGIN CERT/,/END CERT/' > chain.pem
+            if ! grep -q "BEGIN CERT" chain.pem; then
+              # Unreachable is an availability problem, not a trust problem —
+              # don't page on runner network flakes.
+              echo "::warning::$h unreachable from runner; chain check skipped"
+              continue
+            fi
+            awk '/BEGIN CERT/{n++} {print > ("cert-" sprintf("%02d",n) ".pem")}' chain.pem
+            : > ints.pem
+            for f in $(ls cert-*.pem | sort | tail -n +2); do cat "$f" >> ints.pem; done
+            UNTRUSTED=()
+            [ -s ints.pem ] && UNTRUSTED=(-untrusted ints.pem)
+
+            # 1) Does the presented chain still build from our embedded anchors?
+            if ! openssl verify -CAfile "$PEM" "${UNTRUSTED[@]}" cert-01.pem > verify.out 2>&1; then
+              echo "::error::$h chain NO LONGER verifies against the embedded anchors — a CA migration has outrun them. Ship a firmware release adding the new root."
+              cat verify.out
+              FAIL=1
+              continue
+            fi
+
+            # 2) Which anchor did verification actually terminate at, and does
+            #    it have at least a year left? (Anchors nothing chains to may
+            #    expire harmlessly — e.g. GlobalSign R1 in 2028; only the
+            #    load-bearing one gets to fail the build.)
+            anchor_subj=$(openssl verify -CAfile "$PEM" "${UNTRUSTED[@]}" -show_chain cert-01.pem 2>/dev/null \
+              | awk -F': ' '/^depth=/{s=$2} END{print s}')
+            found=0
+            for a in anchor-*.pem; do
+              subj=$(openssl x509 -noout -subject -in "$a" | sed 's/^subject=//')
+              if [ "$subj" = "$anchor_subj" ]; then
+                found=1
+                if openssl x509 -checkend $((365*24*3600)) -noout -in "$a" > /dev/null; then
+                  echo "$h OK — anchor \"$anchor_subj\" valid past 12 months"
+                else
+                  echo "::error::$h terminates at anchor \"$anchor_subj\" which expires within 12 months ($(openssl x509 -noout -enddate -in "$a")). Ship a release with its successor root."
+                  FAIL=1
+                fi
+              fi
+            done
+            [ "$found" = 1 ] || echo "::warning::$h: could not match verification anchor \"$anchor_subj\" back to a PEM entry"
+          done
+
+          # Non-fatal inventory: list anything in the file inside 6 months of
+          # expiry, load-bearing or not, so pruning stays on the radar.
+          for a in anchor-*.pem; do
+            if ! openssl x509 -checkend $((182*24*3600)) -noout -in "$a" > /dev/null; then
+              echo "::warning::embedded anchor \"$(openssl x509 -noout -subject -in "$a" | sed 's/^subject=//')\" expires within 6 months ($(openssl x509 -noout -enddate -in "$a"))"
+            fi
+          done
+
+          exit $FAIL

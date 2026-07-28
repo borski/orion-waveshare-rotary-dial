@@ -29,3 +29,9 @@ bool dial_mcp_call_tool(const char *name, const char *args_json, char **result_o
 
 // The most recent MCP error (HTTP status or JSON-RPC message), for display.
 const char *dial_mcp_last_error(void);
+
+// True if the LAST MCP request failed TLS certificate verification --
+// nonzero mbedtls verify flags on the transport -- rather than a routine
+// network/HTTP/RPC problem. Signals the device's embedded trust anchors are
+// likely stale rather than the server simply being unreachable.
+bool dial_mcp_last_err_cert(void);

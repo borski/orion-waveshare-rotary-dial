@@ -67,6 +67,10 @@ void dial_oauth_pkce(char *verifier, size_t vsz, char *challenge, size_t csz)
 
 typedef struct { char *buf; int len; int cap; } resp_t;
 
+// Set on every http_do() call (cleared on success, so it never outlives the
+// request it describes). See dial_oauth_last_err_cert().
+static bool s_last_err_cert;
+
 static esp_err_t on_http(esp_http_client_event_t *e)
 {
     if (e->event_id == HTTP_EVENT_ON_DATA && e->data_len > 0) {
@@ -106,6 +110,16 @@ static int http_do(const char *url, esp_http_client_method_t method,
     esp_err_t err = esp_http_client_perform(c);
     int status = (err == ESP_OK) ? esp_http_client_get_status_code(c) : -1;
     if (err != ESP_OK) ESP_LOGW(TAG, "%s: %s", url, esp_err_to_name(err));
+
+    // Nonzero verify flags (MBEDTLS_X509_BADCERT_NOT_TRUSTED/EXPIRED/...) mean
+    // the handshake failed because our embedded trust anchors don't vouch for
+    // whatever cert the server presented -- worth telling apart from a plain
+    // network outage. Cleared on every call (success included) so a stale
+    // flag from an earlier request can never leak into this one's result.
+    int tls_code = 0, tls_flags = 0;
+    esp_http_client_get_and_clear_last_tls_error(c, &tls_code, &tls_flags);
+    s_last_err_cert = tls_flags != 0;
+
     esp_http_client_cleanup(c);
     *body_out = r.buf;
     return status;
@@ -491,3 +505,5 @@ void dial_oauth_stop_authorize(void)
 const char *dial_oauth_last_error(void) { return s_token_err; }
 
 bool dial_oauth_last_token_err_permanent(void) { return s_token_err_permanent; }
+
+bool dial_oauth_last_err_cert(void) { return s_last_err_cert; }
