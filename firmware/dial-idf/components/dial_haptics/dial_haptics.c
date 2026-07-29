@@ -53,6 +53,7 @@ static const fx_pair_t FX[] = {
 static QueueHandle_t  s_q;
 static bool           s_present;
 static volatile bool  s_night;
+static volatile bool  s_muted;   // see dial_haptics_mute
 static volatile haptic_level_t s_level = HAPTIC_LEVEL_LOW;   // matches dial_state's own default
 
 static bool wr(uint8_t reg, uint8_t val)
@@ -176,16 +177,29 @@ static bool chip_setup(void)
     return true;
 }
 
+// Queue item: the effect plus whether the caller demanded the SOFT variant
+// regardless of the user's level (dial_haptics_play_soft -- range ends).
+typedef struct { haptic_effect_t fx; bool force_soft; } haptic_req_t;
+
 static void haptics_task(void *arg)
 {
     (void)arg;
-    haptic_effect_t fx;
+    haptic_req_t req;
     for (;;) {
-        if (xQueueReceive(s_q, &fx, portMAX_DELAY) != pdTRUE) continue;
+        if (xQueueReceive(s_q, &req, portMAX_DELAY) != pdTRUE) continue;
+        haptic_effect_t fx = req.fx;
         haptic_level_t level = s_level;
-        if (level == HAPTIC_LEVEL_OFF) continue;
-        bool soft = is_soft(level, s_night);
+        if (level == HAPTIC_LEVEL_OFF) continue;   // off means off, always
+        bool soft = req.force_soft || is_soft(level, s_night);
         uint8_t effect = soft ? FX[fx].night : FX[fx].day;
+        // Set the overdrive clamp PER PLAY, not just on level/night changes.
+        // The effect id and the clamp are two independent halves of "how hard
+        // does this feel", and play_soft() was only swapping the first: at
+        // HAPTIC_LEVEL_HIGH the gentle waveform was still being driven at the
+        // FIRM ceiling, which is exactly as aggressive as it sounds (owner
+        // caught this by feel, 2026-07-29). Writing it here costs one I2C
+        // byte per pulse and makes the two halves agree by construction.
+        wr(REG_OD_CLAMP, soft ? REG_OD_CLAMP_SOFT : REG_OD_CLAMP_FIRM);
         // Re-issuing GO restarts the sequencer — a spin never lags the knob.
         wr(REG_WAVESEQ1, effect);
         wr(REG_WAVESEQ2, 0);
@@ -198,7 +212,7 @@ void dial_haptics_init(void)
     s_present = chip_setup();
     if (!s_present) return;
     // Queue length 1 + overwrite: only the newest effect matters.
-    s_q = xQueueCreate(1, sizeof(haptic_effect_t));
+    s_q = xQueueCreate(1, sizeof(haptic_req_t));
     configASSERT(s_q);
     // Above the network worker (3): a detent's tick is part of the input, and
     // must not queue behind a TLS handshake. Below LVGL (5) — the frame the
@@ -206,10 +220,24 @@ void dial_haptics_init(void)
     xTaskCreate(haptics_task, "haptics", 2560, NULL, 4, NULL);
 }
 
+void dial_haptics_mute(bool muted) { s_muted = muted; }
+
 void dial_haptics_play(haptic_effect_t fx)
 {
+    if (s_muted) return;
     if (!s_present || !s_q) return;
-    xQueueOverwrite(s_q, &fx);
+    haptic_req_t req = { fx, false };
+    xQueueOverwrite(s_q, &req);
+}
+
+// Deliberately ignores s_muted: this is the one pulse that must survive the
+// router's knob-dispatch mute (see the header). Still honours OFF, which the
+// task enforces.
+void dial_haptics_play_soft(haptic_effect_t fx)
+{
+    if (!s_present || !s_q) return;
+    haptic_req_t req = { fx, true };
+    xQueueOverwrite(s_q, &req);
 }
 
 // dial_power's day/night flag. Only AUTO's effect/clamp choice actually

@@ -1,5 +1,7 @@
 #include "dial_state.h"
 
+#include <math.h>
+
 #include <string.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
@@ -12,11 +14,14 @@
 // Shared range clamp for the two brightness prefs — used on both read
 // (defends against a corrupt/out-of-range NVS byte) and write (defends a
 // caller that didn't already clamp, e.g. a future settings-screen bug).
+// 0 is a legal Day/Night value now: on the current curve it means "dimmest
+// this firmware produces", not black (dial_power's tier_duty). The old floor
+// of 10 existed to keep the in-use screen legible, and tier_duty enforces
+// that in duty space instead -- clamping here would only re-break the
+// rescaled values the migration just produced.
 static inline uint8_t clamp_bri_pct(uint8_t pct)
 {
-    if (pct < 10)  return 10;
-    if (pct > 100) return 100;
-    return pct;
+    return pct > 100 ? 100 : pct;
 }
 
 // Same defensive style, for the haptics level. Mirrors dial_haptics.h's
@@ -50,8 +55,20 @@ void dial_state_init(void)
     s_state.phase = PH_BOOT;
     s_state.wifi_join_idx = -1;   // no on-device join attempted yet
     s_state.haptics_level = 1;        // HAPTIC_LEVEL_LOW — the default feel (see dial_haptics.h)
-    s_state.bri_day_pct   = 100;      // fresh-device default == today's exact
-    s_state.bri_night_pct = 100;      // brightness (100% of the existing duty tables)
+    // Fresh-device brightness defaults, chosen by the owner after living with
+    // the dial on a nightstand (2026-07-29): full brightness is uncomfortable
+    // in a bedroom, and a device that arrives glaring is worse than one that
+    // arrives dim. 0 for night is NOT off — on the current curve it is the
+    // dimmest legible duty (see dial_power's tier_duty); the clock's 20 IS on
+    // its own 0-means-off curve, a faint but readable glow across a room.
+    s_state.bri_day_pct   = 30;
+    s_state.bri_night_pct = 0;
+    s_state.bri_night_clock_pct = 20;  // fresh device only,
+                                        // so the clock and in-use night duty read
+                                        // identically until the user changes one
+                                        // — restore_prefs below is what makes an
+                                        // UPGRADING device's default something
+                                        // other than this plain 100
     s_state.beta          = false;    // fresh-device default: stable channel only
     s_state.sched_follow  = true;     // fresh-device default: Follow schedule (owner decision)
     s_state.ota_auto      = 0;        // fresh-device default: Off (explicit consent required)
@@ -76,7 +93,7 @@ void dial_state_restore_prefs(void)
     nvs_handle_t h;
     if (nvs_open(NVS_NS, NVS_READONLY, &h) != ESP_OK) return;
     uint8_t zone = 0, units = 0, haptics = 1 /* HAPTIC_LEVEL_LOW */, rot = 0, relmode = 1;
-    uint8_t bri_day = 100, bri_night = 100;
+    uint8_t bri_day = 100, bri_night = 100, bri_nclk = 100;
     uint8_t beta = 0;
     uint8_t sched_follow = 1;   // matches init's fresh-device default (Follow)
     uint8_t  ota_auto = 0;
@@ -87,8 +104,26 @@ void dial_state_restore_prefs(void)
     bool have_haptics = nvs_get_u8(h, "haptics", &haptics) == ESP_OK;
     bool have_rot     = nvs_get_u8(h, "rot", &rot) == ESP_OK && rot < 4;
     bool have_rel     = nvs_get_u8(h, "relmode", &relmode) == ESP_OK;
-    bool have_bri_day   = nvs_get_u8(h, "bri_day", &bri_day) == ESP_OK;
-    bool have_bri_night = nvs_get_u8(h, "bri_night", &bri_night) == ESP_OK;
+    // v1.2.x moved Day/Night from a 10-100 slider to 0-100, where 0 means
+    // "the dimmest this firmware ever produced" rather than black (see
+    // dial_power's tier_duty). Same physical range, different labelling, so
+    // stored values must be rescaled: p' = (p - 10) * 100 / 90. That is
+    // EXACTLY appearance-preserving -- both curves are linear in percent
+    // through the same endpoints. New keys rather than rewriting the old
+    // ones in place, so the rescale cannot run twice on successive boots and
+    // walk a user's setting down to nothing.
+    uint8_t bri_day2 = 100, bri_night2 = 100;
+    bool have_bri_day   = nvs_get_u8(h, "bri_day2", &bri_day2) == ESP_OK;
+    bool have_bri_night = nvs_get_u8(h, "bri_nite2", &bri_night2) == ESP_OK;
+    bool old_day   = !have_bri_day   && nvs_get_u8(h, "bri_day", &bri_day) == ESP_OK;
+    bool old_night = !have_bri_night && nvs_get_u8(h, "bri_night", &bri_night) == ESP_OK;
+    if (have_bri_day)   bri_day   = bri_day2;
+    else if (old_day)   bri_day   = (uint8_t)((bri_day   > 10 ? (bri_day   - 10) * 100 / 90 : 0));
+    if (have_bri_night) bri_night = bri_night2;
+    else if (old_night) bri_night = (uint8_t)((bri_night > 10 ? (bri_night - 10) * 100 / 90 : 0));
+    have_bri_day   = have_bri_day   || old_day;
+    have_bri_night = have_bri_night || old_night;
+    bool have_bri_nclk  = nvs_get_u8(h, "bri_nclk", &bri_nclk) == ESP_OK;
     bool have_beta      = nvs_get_u8(h, "beta", &beta) == ESP_OK;
     bool have_sched_follow = nvs_get_u8(h, "sched_follow", &sched_follow) == ESP_OK;
     bool have_ota_auto  = nvs_get_u8(h, "ota_auto", &ota_auto) == ESP_OK;
@@ -98,7 +133,8 @@ void dial_state_restore_prefs(void)
     bool have_ota_skip  = nvs_get_str(h, "ota_skip", ota_skip, &ota_skip_sz) == ESP_OK;
     nvs_close(h);
     if (!have_zone && !have_units && !have_haptics && !have_rot && !have_rel
-        && !have_bri_day && !have_bri_night && !have_beta && !have_sched_follow
+        && !have_bri_day && !have_bri_night && !have_bri_nclk && !have_beta
+        && !have_sched_follow
         && !have_ota_auto && !have_ota_defer && !have_ota_shown && !have_ota_skip) return;
 
     xSemaphoreTake(s_mux, portMAX_DELAY);
@@ -127,6 +163,43 @@ void dial_state_restore_prefs(void)
     else if (have_zone) s_state.rel_mode = false;
     if (have_bri_day)   s_state.bri_day_pct   = clamp_bri_pct(bri_day);
     if (have_bri_night) s_state.bri_night_pct = clamp_bri_pct(bri_night);
+    // Night-clock brightness migration. bri_night_clock_pct did not exist
+    // before this pref shipped, so no device in the field has a "bri_nclk"
+    // key yet. If we simply defaulted an absent key to 100 (like a genuinely
+    // fresh device), an existing user's screensaver clock would visibly
+    // BRIGHTEN the instant they upgrade: e.g. someone who already turned
+    // bri_night_pct down to 50% currently sees the standby duty computed as
+    // scale_duty(DUTY_NIGHT.standby, 50%, FLOOR_STANDBY) every night; a bare
+    // 100% night-clock default would jump that to scale_duty(..., 100%, ...)
+    // — brighter, unrequested, and only noticed at 2am. So on an absent key
+    // we instead seed bri_night_clock_pct from the (possibly also just-
+    // restored, above) bri_night_pct value: the migration reproduces
+    // tonight's exact clock duty, and the user can pull the two apart from
+    // there if they want. A brand-fresh device takes neither branch: it has
+    // no night key either, so it keeps dial_state_init's chosen defaults.
+    if (have_bri_nclk) {
+        s_state.bri_night_clock_pct = (bri_nclk <= 100) ? bri_nclk : 100;
+    } else if (have_bri_night) {
+        // Only an UPGRADING device (one that already had a night brightness
+        // stored) gets the migration below. A fresh device has no night key
+        // either, and must keep dial_state_init's chosen default instead of
+        // inheriting a value computed from a placeholder. For an upgrading
+        // device, seed the percent that reproduces the duty it is ALREADY
+        // showing, so an update never changes the glow in someone's bedroom
+        // unasked.
+        //
+        // Before this setting existed the night clock ran at
+        // max(FLOOR_STANDBY 4, DUTY_NIGHT.standby 6 * bri_night / 100). The
+        // new pref maps percent -> duty on a quadratic curve topping out at
+        // 64 (dial_power_night_clock_duty), so invert it: pct = 100 *
+        // sqrt(duty / 64). Duty 6 (a device at 100% night) lands on 31%;
+        // duty 4 (anyone at 50% or below) lands on 25%. Deliberately NOT
+        // copied from bri_night_pct -- these are now different scales, and
+        // 100 on the new curve is ten times the old brightness.
+        int old_duty = (6 * (int)s_state.bri_night_pct) / 100;
+        if (old_duty < 4) old_duty = 4;
+        s_state.bri_night_clock_pct = (uint8_t)lroundf(100.0f * sqrtf((float)old_duty / 64.0f));
+    }
     if (have_beta)       s_state.beta         = (beta != 0);
     if (have_sched_follow) s_state.sched_follow = (sched_follow != 0);
     if (have_ota_auto)   s_state.ota_auto  = (ota_auto <= 1) ? ota_auto : 0;
@@ -368,7 +441,7 @@ void dial_state_set_bri_day_pct(uint8_t pct)
 
     nvs_handle_t h;
     if (nvs_open(NVS_NS, NVS_READWRITE, &h) == ESP_OK) {
-        nvs_set_u8(h, "bri_day", pct);
+        nvs_set_u8(h, "bri_day2", pct);
         nvs_commit(h);
         nvs_close(h);
     }
@@ -384,7 +457,31 @@ void dial_state_set_bri_night_pct(uint8_t pct)
 
     nvs_handle_t h;
     if (nvs_open(NVS_NS, NVS_READWRITE, &h) == ESP_OK) {
-        nvs_set_u8(h, "bri_night", pct);
+        nvs_set_u8(h, "bri_nite2", pct);
+        nvs_commit(h);
+        nvs_close(h);
+    }
+}
+
+uint8_t dial_state_get_bri_night_clock_pct(void)
+{
+    xSemaphoreTake(s_mux, portMAX_DELAY);
+    uint8_t v = s_state.bri_night_clock_pct;
+    xSemaphoreGive(s_mux);
+    return v;
+}
+
+void dial_state_set_bri_night_clock_pct(uint8_t pct)
+{
+    pct = clamp_bri_pct(pct);
+    xSemaphoreTake(s_mux, portMAX_DELAY);
+    s_state.bri_night_clock_pct = pct;
+    s_state.generation++;
+    xSemaphoreGive(s_mux);
+
+    nvs_handle_t h;
+    if (nvs_open(NVS_NS, NVS_READWRITE, &h) == ESP_OK) {
+        nvs_set_u8(h, "bri_nclk", pct);
         nvs_commit(h);
         nvs_close(h);
     }

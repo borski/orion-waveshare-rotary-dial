@@ -208,7 +208,7 @@ static bool on_knob(int detents)
     if (nm < BOOST_MIN_MIN) nm = BOOST_MIN_MIN;
     if (nm > BOOST_MAX_MIN) nm = BOOST_MAX_MIN;
     if (nm == s_minutes) {                           // at the range stop
-        dial_haptics_play(HAPTIC_STOP);
+        dial_haptics_play_soft(HAPTIC_STOP);
         int dir = detents > 0 ? 1 : -1;
         anim_nudge(s_num_box, dir);
         anim_nudge(s_arc, dir);

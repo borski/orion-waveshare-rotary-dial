@@ -23,6 +23,10 @@ static const char *TAG = "power";
 // tables at the user's brightness pref == 100%; the apply path below scales
 // them by dial_state's bri_day/bri_night percent (10..100) at every tick, so
 // these constants must stay exactly what a 100% preference has always meant.
+// Exception: DUTY_NIGHT.standby (the screensaver clock at night) is scaled by
+// its OWN pref, bri_night_clock_pct, not bri_night_pct — see power_task's
+// apply path below for the split and dial_state.h for the migration that
+// keeps existing devices' clock glow unchanged when this pref was introduced.
 typedef struct { uint8_t active, dimmed, standby; } duty_set_t;
 static const duty_set_t DUTY_DAY   = { 255, 90, 25 };
 static const duty_set_t DUTY_NIGHT = { 140, 40, 6  };
@@ -33,11 +37,56 @@ static const duty_set_t DUTY_NIGHT = { 140, 40, 6  };
 #define FLOOR_DIMMED   10
 #define FLOOR_STANDBY   4
 
-static inline uint8_t scale_duty(uint8_t base, uint8_t pct, uint8_t floor)
+/*
+ * The night clock gets its own percent -> duty curve instead of scaling
+ * DUTY_NIGHT.standby, because scaling that base is useless: it is 6, and the
+ * standby floor is 4, so the whole 0-100% range collapsed into duties 4-6 --
+ * indistinguishable to the eye (owner-reported, and correct).
+ *
+ * Range is therefore explicit: 0 turns the clock OFF (a dark bedroom is a
+ * legitimate choice; touch or a detent still wakes the dial to the night
+ * ACTIVE duty), and 100 reaches NIGHT_CLOCK_MAX_DUTY, comfortably readable
+ * across a room. The curve is quadratic because perceived brightness is not
+ * linear in duty: the interesting decisions all live in the first few duty
+ * steps, and a linear ramp would spend most of the knob's travel on
+ * differences nobody can see. Squaring puts ~a third of the range below duty
+ * 7, which is where a bedside clock at 3am actually lives.
+ *
+ * 30% lands on duty 6 -- exactly the fixed value this firmware used before
+ * the setting existed, which is what dial_state's migration seeds to.
+ */
+#define NIGHT_CLOCK_MAX_DUTY 64
+
+uint8_t dial_power_night_clock_duty(uint8_t pct)
 {
-    uint32_t v = ((uint32_t)base * pct) / 100;
-    if (v < floor) v = floor;
-    if (v > 255)   v = 255;
+    if (pct == 0) return 0;                 // off, deliberately
+    if (pct > 100) pct = 100;
+    uint32_t d = ((uint32_t)NIGHT_CLOCK_MAX_DUTY * pct * pct) / 10000;
+    return d < 1 ? 1 : (uint8_t)d;          // any non-zero choice stays visible
+}
+
+/*
+ * Day/Night percent -> duty. The slider reads 0-100, but 0 is NOT black: it
+ * lands on the dimmest duty this firmware has ever produced for that tier,
+ * which is what the old 10%-floored slider bottomed out at. That keeps the
+ * end values identical (owner: "make it go to 0% instead of 10% but keep the
+ * end values the same") while giving the whole knob travel to the range
+ * people actually use -- and it keeps the in-use screen legible at 0, which
+ * a literal 0 duty would not.
+ *
+ * min = the old floor for this tier: max(hard floor, base/10), i.e. exactly
+ * what scale_duty(base, 10, floor) returned before. Interpolating from there
+ * to base is EXACTLY appearance-preserving for the old 10-100 values once
+ * they are rescaled onto 0-100 (dial_state's migration does that): both
+ * curves are linear in percent through the same two endpoints.
+ */
+static inline uint8_t tier_duty(uint8_t base, uint8_t pct, uint8_t floor)
+{
+    uint32_t min = (uint32_t)base / 10;
+    if (min < floor) min = floor;
+    if (pct > 100) pct = 100;
+    uint32_t v = min + ((uint32_t)(base - min) * pct) / 100;
+    if (v > 255) v = 255;
     return (uint8_t)v;
 }
 
@@ -103,13 +152,26 @@ static void power_task(void *arg)
                 fade_to((uint8_t)preview);
             } else {
                 const duty_set_t *d = duties();
-                uint8_t pct = s_night ? dial_state_get_bri_night_pct()
-                                       : dial_state_get_bri_day_pct();
+                // ACTIVE/DIMMED always follow bri_day_pct/bri_night_pct. STANDBY
+                // (the screensaver clock) is the one tier that forks by table:
+                // day's standby duty still follows bri_day_pct (untouched by this
+                // feature), but night's standby duty follows the separate
+                // bri_night_clock_pct pref instead — that's the whole point of
+                // the setting (a bedroom clock glow independent of in-use night
+                // brightness). See dial_power_preview's header comment for the
+                // matching preview-side split.
+                uint8_t pct_live = s_night ? dial_state_get_bri_night_pct()
+                                            : dial_state_get_bri_day_pct();
+                uint8_t pct_standby = s_night ? dial_state_get_bri_night_clock_pct()
+                                               : dial_state_get_bri_day_pct();
                 uint8_t duty;
                 switch (want) {
-                case DPWR_ACTIVE:  duty = scale_duty(d->active,  pct, FLOOR_ACTIVE);  break;
-                case DPWR_DIMMED:  duty = scale_duty(d->dimmed,  pct, FLOOR_DIMMED);  break;
-                case DPWR_STANDBY: duty = scale_duty(d->standby, pct, FLOOR_STANDBY); break;
+                case DPWR_ACTIVE:  duty = tier_duty(d->active,  pct_live,    FLOOR_ACTIVE);  break;
+                case DPWR_DIMMED:  duty = tier_duty(d->dimmed,  pct_live,    FLOOR_DIMMED);  break;
+                case DPWR_STANDBY:
+                    duty = s_night ? dial_power_night_clock_duty(pct_standby)
+                                   : tier_duty(d->standby, pct_standby, FLOOR_STANDBY);
+                    break;
                 default:           duty = d->active; break;
                 }
                 fade_to(duty);
@@ -164,10 +226,22 @@ void dial_power_brightness_changed(void)
     s_force_reapply = true;
 }
 
-void dial_power_preview(bool night, uint8_t pct)
+void dial_power_preview(bool night, dial_power_level_t level, uint8_t pct)
 {
     const duty_set_t *base = night ? &DUTY_NIGHT : &DUTY_DAY;
-    s_preview_duty = scale_duty(base->active, pct, FLOOR_ACTIVE);
+    uint8_t duty;
+    switch (level) {
+    case DPWR_DIMMED:  duty = tier_duty(base->dimmed,  pct, FLOOR_DIMMED);  break;
+    case DPWR_STANDBY:
+        // Same curve power_task applies, or the preview would be showing a
+        // brightness the setting cannot actually produce.
+        duty = night ? dial_power_night_clock_duty(pct)
+                     : tier_duty(base->standby, pct, FLOOR_STANDBY);
+        break;
+    case DPWR_ACTIVE:
+    default:           duty = tier_duty(base->active,  pct, FLOOR_ACTIVE);  break;
+    }
+    s_preview_duty = duty;
     s_force_reapply = true;
 }
 

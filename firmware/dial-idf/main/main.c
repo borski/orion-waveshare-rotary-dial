@@ -19,6 +19,7 @@
 #include <time.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "esp_mac.h"
 #include "esp_timer.h"
 #include "esp_log.h"
 #include "esp_system.h"
@@ -113,14 +114,19 @@ static const char *zone_id_str(zone_idx_t z) { return z == ZONE_A ? "zone_a" : "
 #define KNOB_B 7
 static knob_handle_t s_knob;
 
-// Haptic tick fires here (non-blocking queue write) so the pulse lands with
-// the detent, not a dispatcher period later. A detent arriving in standby
-// wakes the screen and is consumed — a 3am reach must not change the temp.
+// No haptic per detent: the encoder is mechanically detented, so a motor
+// pulse on top of each click is redundant and reads as noise (owner,
+// 2026-07-29). This is where that pulse used to fire -- in the decoder's own
+// task, ahead of the router -- which is why muting the router's dispatch
+// alone did not silence it. Range-end feedback survives, but it is raised by
+// the screens themselves via dial_haptics_play_soft().
+//
+// A detent arriving in standby wakes the screen and is consumed — a 3am
+// reach must not change the temp.
 static void knob_step(int dir)
 {
     dial_state_stamp_input();
     if (dial_power_wake_consumes()) return;
-    dial_haptics_play(HAPTIC_TICK);
     ui_router_knob_input(dir);
 }
 static void knob_left_cb(void *arg, void *data)  { (void)arg; (void)data; knob_step(-1); }
@@ -1889,8 +1895,34 @@ static void worker_task(void *arg)
             app_state_t ota_st;
             dial_state_get(&ota_st);
             struct tm ota_lt;
-            bool in_window = ota_st.clock_valid && dial_time_now(&ota_lt) &&
-                              ota_lt.tm_hour >= 10 && ota_lt.tm_hour < 16;
+            // Per-device offset into the 10:00-16:00 window. Without it the
+            // whole fleet checks at 10:00 sharp: the 24h timer expires
+            // overnight for everybody, so the first tick past the window's
+            // start releases every device at once. Installing a release makes
+            // that worse rather than better -- an OTA reboots every device
+            // that took it, aligning their timers from then on.
+            //
+            // Derived from the Wi-Fi MAC, so it is STABLE per device (a
+            // random draw would re-roll each boot and could keep landing on
+            // the same minute) and needs no storage. 0-299 minutes leaves at
+            // least an hour of window after the latest offset.
+            static int s_ota_check_offset_min = -1;
+            if (s_ota_check_offset_min < 0) {
+                uint8_t mac[6] = { 0 };
+                esp_read_mac(mac, ESP_MAC_WIFI_STA);
+                s_ota_check_offset_min = ((mac[4] << 8) | mac[5]) % 300;
+                ESP_LOGI(TAG, "OTA auto-check window offset: +%dmin past 10:00",
+                         s_ota_check_offset_min);
+            }
+            // Fill ota_lt BEFORE reading it: the old single-expression form
+            // called dial_time_now() mid-condition, so anything computed from
+            // ota_lt above it would have read stale/uninitialised fields.
+            bool have_local = ota_st.clock_valid && dial_time_now(&ota_lt);
+            int window_open_min = 10 * 60 + s_ota_check_offset_min;
+            int now_min_local = have_local ? ota_lt.tm_hour * 60 + ota_lt.tm_min : -1;
+            bool in_window = have_local &&
+                              now_min_local >= window_open_min &&
+                              ota_lt.tm_hour < 16;
             bool relief_any = ota_st.zones[ZONE_A].relief_active ||
                                ota_st.zones[ZONE_B].relief_active;
             if (in_window && !relief_any && ota_st.phase == PH_READY) {

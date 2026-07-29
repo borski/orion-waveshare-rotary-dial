@@ -5,6 +5,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "dial_power.h"
+#include "dial_haptics.h"
 
 static const char *TAG = "ui_router";
 
@@ -133,8 +134,17 @@ static void dispatch_tick(lv_timer_t *t)
     s_knob_accum = 0;
     taskEXIT_CRITICAL(&s_knob_mux);
 
-    if (detents != 0 && scr->on_knob && scr->on_knob((int)detents))
-        dial_state_stamp_input();
+    // Knob turns are silent: the encoder's own detents are the feedback, and
+    // a haptic pulse per detent on top of them reads as noise (owner
+    // request). Muting around the dispatch catches every screen's on_knob --
+    // including any added later -- while leaving taps, confirms and drags
+    // (which have no mechanical feedback of their own) untouched.
+    if (detents != 0 && scr->on_knob) {
+        dial_haptics_mute(true);
+        bool handled = scr->on_knob((int)detents);
+        dial_haptics_mute(false);
+        if (handled) dial_state_stamp_input();
+    }
 
     app_state_t st;
     dial_state_get(&st);

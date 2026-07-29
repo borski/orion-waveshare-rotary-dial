@@ -292,6 +292,20 @@ typedef struct {
     // see dial_state_get_bri_day_pct/set_bri_day_pct.
     uint8_t bri_day_pct;
     uint8_t bri_night_pct;
+    // Night-only override for JUST the standby (screensaver clock) duty —
+    // the face that glows in a dark bedroom all night, independent of the
+    // brightness used while the dial is actually being interacted with at
+    // night. Day is untouched: day's standby tier still follows bri_day_pct
+    // like the rest of the day table. Same 10..100/10%-step range and
+    // clamp-on-read contract as the pair above. Defaults to 100 on a fresh
+    // device (matches bri_day_pct/bri_night_pct's own fresh-device default),
+    // but an UPGRADING device must NOT see this default — see
+    // dial_state_restore_prefs's migration comment: on that path it is
+    // seeded from the device's own bri_night_pct instead, so a device
+    // already dimmed at night keeps exactly the clock glow it has tonight
+    // until the user deliberately pulls the two apart. See
+    // dial_state_get_bri_night_clock_pct/set_bri_night_clock_pct.
+    uint8_t bri_night_clock_pct;
     // Beta OTA channel opt-in (SCR_UPDATE's "Beta builds" toggle), persisted
     // to NVS "ui"/"beta". dial_state has no business knowing about dial_ota,
     // so this is just the stored preference -- the worker (main.c) reads it
@@ -471,6 +485,13 @@ uint8_t dial_state_get_bri_day_pct(void);
 uint8_t dial_state_get_bri_night_pct(void);
 void    dial_state_set_bri_day_pct(uint8_t pct);
 void    dial_state_set_bri_night_pct(uint8_t pct);
+
+// Night-clock (screensaver-at-night) brightness override — see app_state_t.
+// bri_night_clock_pct's comment for what it governs and how it migrates.
+// Same getter/setter/clamp/NVS-immediate-commit shape as the pair above,
+// persisted to NVS "ui"/"bri_nclk".
+uint8_t dial_state_get_bri_night_clock_pct(void);
+void    dial_state_set_bri_night_clock_pct(uint8_t pct);
 
 // Beta OTA channel preference (see app_state_t.beta above). Same
 // getter+setter shape as the brightness pair; setter persists immediately to

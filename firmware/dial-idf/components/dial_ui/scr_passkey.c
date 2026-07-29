@@ -169,7 +169,7 @@ static void del_event_cb(lv_event_t *e)
 {
     (void)e;
     if (s_len == 0) {
-        dial_haptics_play(HAPTIC_STOP);
+        dial_haptics_play_soft(HAPTIC_STOP);
         return;
     }
     s_pw[--s_len] = '\0';
@@ -184,7 +184,7 @@ static void done_event_cb(lv_event_t *e)
         // An open network is real but rare; refusing a blank submit here
         // instead of guessing "did they mean to leave it empty" keeps this
         // screen's one irreversible action a deliberate one.
-        dial_haptics_play(HAPTIC_STOP);
+        dial_haptics_play_soft(HAPTIC_STOP);
         return;
     }
     dial_haptics_play(HAPTIC_CONFIRM);
@@ -423,7 +423,7 @@ static bool on_knob(int detents)
     if (np > n - 1) np = n - 1;
 
     if (np == s_pos) {
-        dial_haptics_play(HAPTIC_STOP);
+        dial_haptics_play_soft(HAPTIC_STOP);
         anim_nudge(s_cand_btn, detents > 0 ? 1 : -1);
         return true;
     }

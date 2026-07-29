@@ -484,17 +484,36 @@ static void scenario_brightness_menu(void)
 
 // The full-screen SCR_BRIGHTNESS picker (replaces the old inline settings-row
 // edit — see scr_brightness.c) opened on the Night row, then knob-adjusted
-// down from the 100% default to 80% so the render shows a deliberately
-// chosen value instead of just the untouched opening state — same idiom
-// scenario_boost uses for its own picker.
+// down from the 100% default so the render shows a deliberately chosen
+// value (and the drag handle parked at it) instead of just the untouched
+// opening state — same idiom scenario_boost uses for its own picker.
+// sim_knob(-2) drains as one on_knob(-2) batch: |batch|==2 accelerates to
+// BRI_ACCEL_2_MULT (3%/detent), so 100% -> 100 - 2*3 = 94%.
 static void scenario_settings_brightness(void)
 {
     apply_baseline();
     ui_router_go(SCR_BRIGHTNESS, (void *)(uintptr_t)1 /* night */, LV_SCR_LOAD_ANIM_NONE);
     pump_ms(300);
-    sim_knob(-2);   // 100% -> 80%
+    sim_knob(-2);   // 100% -> 94% (accelerated: 2 detents * 3%/detent)
     pump_ms(300);
     snapshot("brightness");
+}
+
+// The same picker opened on the new Night clock row (packed arg 2) — mainly
+// to verify the shorter "NIGHT CLOCK" caption clears the arc's chord at the
+// same y-offset tuned for "NIGHT BRIGHTNESS" (see scr_brightness.c's create()
+// comment), and that the live preview visibly differs from the Night row
+// above (it previews the NIGHT table's STANDBY duty, deliberately very dim).
+// sim_knob(-3) drains as one on_knob(-3) batch: |batch|>=3 accelerates to
+// BRI_ACCEL_3_MULT (6%/detent), so 100% -> 100 - 3*6 = 82%.
+static void scenario_settings_brightness_clock(void)
+{
+    apply_baseline();
+    ui_router_go(SCR_BRIGHTNESS, (void *)(uintptr_t)2 /* night clock */, LV_SCR_LOAD_ANIM_NONE);
+    pump_ms(300);
+    sim_knob(-3);   // 100% -> 82% (accelerated: 3 detents * 6%/detent)
+    pump_ms(300);
+    snapshot("brightness-clock");
 }
 
 static void scenario_wifi_info(void)
@@ -586,11 +605,12 @@ int main(void)
     scenario_adjust_mode();
     scenario_brightness_menu();
     scenario_settings_brightness();
+    scenario_settings_brightness_clock();
     scenario_wifi_info();
     scenario_about();
     scenario_updating();
     scenario_standby();
 
-    printf("done: 23 screens rendered to %s\n", DIAL_SIM_OUTPUT_DIR);
+    printf("done: 24 screens rendered to %s\n", DIAL_SIM_OUTPUT_DIR);
     return 0;
 }

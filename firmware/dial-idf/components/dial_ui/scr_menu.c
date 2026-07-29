@@ -37,6 +37,7 @@
 #define CY 180
 #define ARC_R 165
 #define ROW_H 72
+#define DOT_D 12      // notification dot diameter
 
 static lv_obj_t *s_ring;
 static lv_obj_t *s_list;
@@ -45,7 +46,7 @@ static lv_obj_t *s_dot_a, *s_dot_b, *s_dot_menu;
 // "Update" row's value label — "" when idle/up-to-date, the pending version
 // (or "New" if it somehow arrives blank) while one is available. The row
 // itself is permanent (see make_update_row); only this label's text changes.
-static lv_obj_t *s_val_update;
+static lv_obj_t *s_dot_update;
 
 /* ---- row factory -----------------------------------------------------*/
 
@@ -114,13 +115,15 @@ static lv_obj_t *make_row(lv_obj_t *parent, const char *label_txt, screen_id_t d
  * "Update" instead of replacing it.
  */
 
-static void set_update_row_label(lv_obj_t *val, const app_state_t *st)
+// Visible only while an update is actually pending. Colour comes from the
+// palette pass (day/night can flip while this screen sits idle underneath
+// another face), so this only decides presence.
+static void set_update_row_dot(lv_obj_t *dot, const app_state_t *st)
 {
-    if (!val) return;
-    if ((dial_ota_status_t)st->ota.status == OTA_AVAILABLE)
-        lv_label_set_text(val, st->ota.latest[0] ? st->ota.latest : "New");
-    else
-        lv_label_set_text(val, "");
+    if (!dot) return;
+    bool pending = (dial_ota_status_t)st->ota.status == OTA_AVAILABLE;
+    if (pending) lv_obj_clear_flag(dot, LV_OBJ_FLAG_HIDDEN);
+    else         lv_obj_add_flag(dot, LV_OBJ_FLAG_HIDDEN);
 }
 
 static lv_obj_t *make_update_row(lv_obj_t *parent, const app_state_t *st)
@@ -144,13 +147,23 @@ static lv_obj_t *make_update_row(lv_obj_t *parent, const app_state_t *st)
     lv_label_set_text(lbl, "Update");
     lv_obj_center(lbl);
 
-    // The availability badge hangs off the right WITHOUT displacing the
-    // centered label, so the row still lines up with its neighbors whether
-    // or not an update is pending.
-    s_val_update = lv_label_create(row);
-    lv_obj_set_style_text_font(s_val_update, &lv_font_montserrat_16, 0);
-    lv_obj_align(s_val_update, LV_ALIGN_RIGHT_MID, 0, 0);
-    set_update_row_label(s_val_update, st);
+    // A notification dot rather than the version string (owner request): at a
+    // glance the only question this row answers from the menu is "is there
+    // something waiting", and a dot answers it without competing with the
+    // label for width or needing to be read. The version itself is one tap
+    // away on SCR_UPDATE, which shows it against the installed one.
+    //
+    // Aligned OUT_RIGHT of the label rather than to the row's right edge, so
+    // it reads as attached to the word "Update" instead of floating at the
+    // bezel -- and it tracks the label, which stays centered like every
+    // other row on this menu.
+    s_dot_update = lv_obj_create(row);
+    lv_obj_set_size(s_dot_update, DOT_D, DOT_D);
+    lv_obj_set_style_radius(s_dot_update, LV_RADIUS_CIRCLE, 0);
+    lv_obj_set_style_border_width(s_dot_update, 0, 0);
+    lv_obj_clear_flag(s_dot_update, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_align_to(s_dot_update, lbl, LV_ALIGN_OUT_RIGHT_MID, 8, 0);
+    set_update_row_dot(s_dot_update, st);
 
     return row;
 }
@@ -164,7 +177,7 @@ static lv_obj_t *make_update_row(lv_obj_t *parent, const app_state_t *st)
 // count/transform bookkeeping to redo here.
 static void sync_update_row(const app_state_t *st)
 {
-    set_update_row_label(s_val_update, st);
+    set_update_row_dot(s_dot_update, st);
 }
 
 /* ---- palette -----------------------------------------------------------*/
@@ -191,6 +204,14 @@ static void apply_palette(const app_state_t *st)
         }
     }
 
+    // The dot is an lv_obj, not a label, so the text-colour pass above does
+    // nothing for it. ink_primary, deliberately NOT `warning`: an available
+    // update is an offer, not a fault, and this dial reserves the warning
+    // tone for things that are actually wrong. At night the palette's own
+    // ink_primary is already warm-dimmed, so the dot quiets down with
+    // everything else instead of glowing at a sleeping household.
+    if (s_dot_update) lv_obj_set_style_bg_color(s_dot_update, pal->ink_primary, 0);
+
     // Page dots — same row the dial faces draw (dial_dots_layout owns which
     // dots exist and where); Menu's own dot is always the filled one here.
     dial_dots_layout(st, s_dot_b, s_dot_a, s_dot_menu);
@@ -204,7 +225,7 @@ static void apply_palette(const app_state_t *st)
 static void create(lv_obj_t *scr, void *arg)
 {
     (void)arg;
-    s_val_update = NULL;
+    s_dot_update = NULL;
     const dial_palette_t *pal = PAL();
     lv_obj_set_style_bg_color(scr, pal->bg, 0);
 
@@ -263,7 +284,7 @@ static void destroy(void)
     s_ring = NULL;
     s_list = NULL;
     s_dot_a = s_dot_b = s_dot_menu = NULL;
-    s_val_update = NULL;
+    s_dot_update = NULL;
 }
 
 static void on_state(const app_state_t *st)
@@ -279,7 +300,7 @@ static bool on_knob(int detents)
 {
     if (!s_list) return false;
     int r = dial_list_knob(s_list, detents);
-    if (r) dial_haptics_play(r > 0 ? HAPTIC_TICK : HAPTIC_STOP);
+    if (r < 0) dial_haptics_play_soft(HAPTIC_STOP);   // rotor hit its first/last row
     return true;
 }
 

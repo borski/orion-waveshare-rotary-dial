@@ -1,18 +1,26 @@
 /*
- * SCR_BRIGHTNESS_MENU — the Day/Night brightness submenu, reached from
- * scr_settings.c's single "Brightness" row (owner requirement: collapse the
- * two brightness rows that used to live directly in Settings into the same
- * submenu shape as the Update screen). A single scrollable list:
+ * SCR_BRIGHTNESS_MENU — the Day/Night/Night-clock brightness submenu, reached
+ * from scr_settings.c's single "Brightness" row (owner requirement: collapse
+ * the two brightness rows that used to live directly in Settings into the
+ * same submenu shape as the Update screen). A single scrollable list:
  *
- *   < Back   -> SCR_SETTINGS
- *   Day      value = the current day percent (st->bri_day_pct); tap opens
- *            the full-screen SCR_BRIGHTNESS picker with packed arg 0.
- *   Night    value = the current night percent (st->bri_night_pct); tap
- *            opens SCR_BRIGHTNESS with packed arg 1.
+ *   < Back        -> SCR_SETTINGS
+ *   Day           value = the current day percent (st->bri_day_pct); tap
+ *                 opens the full-screen SCR_BRIGHTNESS picker with packed
+ *                 arg 0.
+ *   Night         value = the current night percent (st->bri_night_pct);
+ *                 tap opens SCR_BRIGHTNESS with packed arg 1. Governs the
+ *                 backlight while the dial is actually in use at night
+ *                 (ACTIVE/DIMMED tiers).
+ *   Night clock   value = the current night-clock percent
+ *                 (st->bri_night_clock_pct); tap opens SCR_BRIGHTNESS with
+ *                 packed arg 2. Governs ONLY the standby/screensaver clock
+ *                 face at night — the thing that actually glows in a dark
+ *                 bedroom all night, independent of "Night" above.
  *
  * The picker (scr_brightness.c) owns the live preview and the actual
- * commit, same as when these two rows lived in Settings directly — this
- * screen only ever shows the last-committed percent and, on both of the
+ * commit, same as when the first two rows lived in Settings directly — this
+ * screen only ever shows the last-committed percent and, on every one of the
  * picker's exit paths, is where the user lands back.
  *
  * No other entry point (no schedule, no zone), so on_state has nothing to
@@ -30,6 +38,7 @@ static lv_obj_t *s_title_lbl;
 static lv_obj_t *s_list;
 static lv_obj_t *s_val_day;
 static lv_obj_t *s_val_night;
+static lv_obj_t *s_val_night_clock;
 
 /* ---- row factory (scr_settings.c's, ported verbatim) --------------------*/
 
@@ -90,6 +99,14 @@ static void row_night_cb(lv_event_t *e)
     ui_router_go(SCR_BRIGHTNESS, (void *)(uintptr_t)1, LV_SCR_LOAD_ANIM_NONE);
 }
 
+// Packed arg 2 = the night-clock (standby-only) picker — see scr_brightness.c.
+static void row_night_clock_cb(lv_event_t *e)
+{
+    (void)e;
+    dial_haptics_play(HAPTIC_TICK);
+    ui_router_go(SCR_BRIGHTNESS, (void *)(uintptr_t)2, LV_SCR_LOAD_ANIM_NONE);
+}
+
 /* ---- palette ---------------------------------------------------------------*/
 
 static void apply_palette(lv_obj_t *scr)
@@ -121,8 +138,9 @@ static void create(lv_obj_t *scr, void *arg)
     s_list = dial_list_create(scr, ROW_H);
 
     make_row(s_list, LV_SYMBOL_LEFT "  Back", row_back_cb, NULL);
-    make_row(s_list, "Day",   row_day_cb,   &s_val_day);
-    make_row(s_list, "Night", row_night_cb, &s_val_night);
+    make_row(s_list, "Day",         row_day_cb,         &s_val_day);
+    make_row(s_list, "Night",       row_night_cb,       &s_val_night);
+    make_row(s_list, "Night clock", row_night_clock_cb, &s_val_night_clock);
 
     // Created AFTER the list so it draws over rows scrolling beneath it —
     // same fixed title slot the other menu sub-screens use.
@@ -141,6 +159,7 @@ static void destroy(void)
     s_title_lbl = NULL;
     s_val_day = NULL;
     s_val_night = NULL;
+    s_val_night_clock = NULL;
 }
 
 static void on_state(const app_state_t *st)
@@ -157,6 +176,8 @@ static void on_state(const app_state_t *st)
     lv_label_set_text(s_val_day, buf);
     snprintf(buf, sizeof buf, "%u%%", (unsigned)st->bri_night_pct);
     lv_label_set_text(s_val_night, buf);
+    snprintf(buf, sizeof buf, "%u%%", (unsigned)st->bri_night_clock_pct);
+    lv_label_set_text(s_val_night_clock, buf);
 }
 
 // The knob walks the focused row (one per detent, dial_list's rotor snap) —
@@ -165,7 +186,7 @@ static bool on_knob(int detents)
 {
     if (!s_list || detents == 0) return false;
     int r = dial_list_knob(s_list, detents);
-    if (r) dial_haptics_play(r > 0 ? HAPTIC_TICK : HAPTIC_STOP);
+    if (r < 0) dial_haptics_play_soft(HAPTIC_STOP);   // rotor hit its first/last row
     return true;
 }
 

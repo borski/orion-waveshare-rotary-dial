@@ -50,15 +50,26 @@ void dial_power_set_night(bool night);
 void dial_power_brightness_changed(void);
 
 // Settings-screen live preview: while set, power_task fades to `pct` percent
-// of the requested table's ACTIVE duty instead of the normal level duty —
-// deliberately still just the active brightness regardless of the real idle
-// level, since the screen is by definition in front of the user while they're
-// dialing this in. `night` selects which base table (DAY/NIGHT) to preview;
-// previewing NIGHT during the day is intentional (the user must be able to
-// see what they're choosing). Call again on every knob detent to update the
-// live value; each call also forces a reapply so the fade starts within one
-// tick. dial_power_preview_end() clears the override (also forcing a reapply
-// back to the normal level duty) — screens MUST call it when edit mode ends,
-// including on teardown, or the override sticks forever.
-void dial_power_preview(bool night, uint8_t pct);
+// of the requested table's `level` duty instead of the normal level duty.
+// `night` selects which base table (DAY/NIGHT) to preview; previewing NIGHT
+// during the day is intentional (the user must be able to see what they're
+// choosing). `level` selects which of that table's three duty entries the
+// picker is actually editing — DPWR_ACTIVE for the Day/Night brightness
+// pickers (the screen is by definition in front of the user while they're
+// dialing this in, so ACTIVE is what they'd otherwise be looking at), and
+// DPWR_STANDBY for the Night Clock picker (bri_night_clock_pct governs ONLY
+// the night standby/screensaver duty, so previewing ACTIVE there would show
+// the wrong — much brighter — glow). Call again on every knob detent to
+// update the live value; each call also forces a reapply so the fade starts
+// within one tick. dial_power_preview_end() clears the override (also
+// forcing a reapply back to the normal level duty) — screens MUST call it
+// when edit mode ends, including on teardown, or the override sticks
+// forever.
+// Percent -> duty for the NIGHT standby clock (0 = off, 100 = brightest),
+// on a quadratic curve so the dim end where a bedside clock lives gets most
+// of the range. Exposed because dial_state's migration inverts it to seed
+// the pref at the duty this firmware used before the setting existed.
+uint8_t dial_power_night_clock_duty(uint8_t pct);
+
+void dial_power_preview(bool night, dial_power_level_t level, uint8_t pct);
 void dial_power_preview_end(void);

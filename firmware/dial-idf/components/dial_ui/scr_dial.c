@@ -944,7 +944,7 @@ static bool on_knob(int detents)
     // setpoint under the counting-down pill. Consumed (returns true) with a
     // stop cue, never applied.
     if (s_relief_active) {
-        dial_haptics_play(HAPTIC_STOP);
+        dial_haptics_play_soft(HAPTIC_STOP);
         return true;
     }
 
@@ -961,7 +961,7 @@ static bool on_knob(int detents)
         if (nf > DIAL_TEMP_MAX_F) nf = DIAL_TEMP_MAX_F;
     }
     if (nf == s_shown_f) {                          // pinned at the range stop
-        dial_haptics_play(HAPTIC_STOP);
+        dial_haptics_play_soft(HAPTIC_STOP);
         int dir = detents > 0 ? 1 : -1;
         anim_nudge(s_num_box, dir);
         anim_nudge(s_arc, dir);

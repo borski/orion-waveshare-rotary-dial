@@ -202,7 +202,7 @@ static bool on_knob(int detents)
 {
     if (!s_list) return false;
     int r = dial_list_knob(s_list, detents);
-    if (r) dial_haptics_play(r > 0 ? HAPTIC_TICK : HAPTIC_STOP);
+    if (r < 0) dial_haptics_play_soft(HAPTIC_STOP);   // rotor hit its first/last row
     return true;
 }
 

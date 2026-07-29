@@ -250,7 +250,7 @@ static bool on_knob(int detents)
     int idx = st.sched_follow ? 0 : 1;         // 0 = Schedule, 1 = Hold
     int nidx = idx + (detents > 0 ? 1 : -1);
     if (nidx < 0 || nidx > 1) {
-        dial_haptics_play(HAPTIC_STOP);
+        dial_haptics_play_soft(HAPTIC_STOP);
         anim_nudge(nidx < 0 ? s_pill_schedule : s_pill_hold, detents > 0 ? 1 : -1);
         return true;
     }

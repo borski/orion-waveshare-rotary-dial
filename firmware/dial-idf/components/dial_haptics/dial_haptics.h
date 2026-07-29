@@ -53,7 +53,25 @@ typedef enum {
 // is absent — haptics just stay disabled.
 void dial_haptics_init(void);
 
-// Fire an effect (non-blocking; drops if level is OFF or the chip is absent).
+// Mute/unmute playback for a scope. The screen router wraps knob dispatch in
+// this: the encoder has real mechanical detents you can feel, and a motor
+// pulse on top of every one of them is too much (owner, 2026-07-29). Muting
+// at the dispatch boundary rather than deleting ~40 call sites keeps each
+// screen's tap/confirm/drag feedback intact -- those have no mechanical
+// counterpart -- and cannot be missed by a screen added later.
+void dial_haptics_mute(bool muted);
+
+// Range-end feedback: always the SOFT variant, whatever the user's haptics
+// level is, and audible through dial_haptics_mute() (the router mutes knob
+// dispatch, and this is the one knob-time pulse worth keeping -- hitting a
+// limit is information the encoder's detents cannot convey, since it feels
+// identical to every other click). Still silent at HAPTIC_LEVEL_OFF: "off"
+// has to mean off. Owner, 2026-07-29: "except maybe when it hits an end
+// state I would be ok with a haptic at low ... should not change with the
+// haptics settings".
+void dial_haptics_play_soft(haptic_effect_t fx);
+
+// Fire an effect (non-blocking; drops if level is OFF, muted, or chip absent).
 void dial_haptics_play(haptic_effect_t fx);
 
 // Night attenuation: true = the sleep window is active (owner asleep

@@ -8,7 +8,8 @@
  * set_ui_temp, set_zone_on, set_ui_zone, set_welcomed, set_side_picked,
  * set_units_c, set_rel_mode, set_haptics_level, set_rotation, set_wifi_join,
  * clear_wifi_join_failed, set_phase, stamp_input, get/set_bri_day_pct,
- * get/set_bri_night_pct, set_beta, set_sched_follow, set_ota_auto,
+ * get/set_bri_night_pct, get/set_bri_night_clock_pct, set_beta,
+ * set_sched_follow, set_ota_auto,
  * set_ota_defer, set_ota_skip, clear_ota_prompt_due, and dial_cmd_post (a
  * logging no-op — there is no worker task here to drain the queue).
  * set_ota_shown is deliberately NOT here: only main.c's worker calls it
@@ -34,6 +35,11 @@ void sim_state_reset(void)
     s_state.wifi_join_idx = -1;
     s_state.bri_day_pct = 100;    // matches dial_state_init's fresh-device default,
     s_state.bri_night_pct = 100;  // so screenshots render scr_settings' new rows as "100%"
+    s_state.bri_night_clock_pct = s_state.bri_night_pct;  // mirrors dial_state_init's
+                                   // own fresh-device seed (both 100) — a fresh
+                                   // sim state has nothing to migrate, so this is
+                                   // just "same as night" rather than a bare 100
+                                   // literal, matching the real firmware's intent
     s_state.haptics_level = 1;    // HAPTIC_LEVEL_AUTO — matches dial_state_init's default
     s_state.sched_follow = true;  // "Dial adjusts" default — matches dial_state_init's default
     s_state.ota_auto = 0;         // Off — matches dial_state_init's fresh-device default
@@ -110,6 +116,14 @@ void dial_state_set_bri_day_pct(uint8_t pct)
 void dial_state_set_bri_night_pct(uint8_t pct)
 {
     s_state.bri_night_pct = pct;
+    s_state.generation++;
+}
+
+uint8_t dial_state_get_bri_night_clock_pct(void) { return s_state.bri_night_clock_pct; }
+
+void dial_state_set_bri_night_clock_pct(uint8_t pct)
+{
+    s_state.bri_night_clock_pct = pct;
     s_state.generation++;
 }
 
