@@ -1,7 +1,9 @@
 # Spec: update prompt + auto-update
 
-Status: **approved for a future release (target v1.2.0), not built.**
-Owner decision 2026-07-28. Nothing in this document ships with v1.1.x.
+Status: **APPROVED AND IN BUILD (2026-07-29).** Owner approved implementation
+after v1.2.0-beta.2 was verified on hardware; targets the next beta.
+(Earlier status line said "not built" — that was written while v1.2.0 was
+still being cut and is superseded.)
 
 ## Problem
 

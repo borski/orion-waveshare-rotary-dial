@@ -54,6 +54,10 @@ void dial_state_init(void)
     s_state.bri_night_pct = 100;      // brightness (100% of the existing duty tables)
     s_state.beta          = false;    // fresh-device default: stable channel only
     s_state.sched_follow  = true;     // fresh-device default: Follow schedule (owner decision)
+    s_state.ota_auto      = 0;        // fresh-device default: Off (explicit consent required)
+    // ota_defer/ota_shown/ota_skip/ota_prompt_due all default to 0/""/false
+    // via the memset above -- 0 is exactly "no defer pending" and "never
+    // shown" for the two epoch fields, so no explicit seed needed here.
     // Fresh-device default: relative scale (owner decision). Seeded here, in
     // RAM, exactly like haptics_level above — restore_prefs opens NVS
     // read-only and early-returns when the "ui" namespace doesn't exist yet
@@ -75,6 +79,9 @@ void dial_state_restore_prefs(void)
     uint8_t bri_day = 100, bri_night = 100;
     uint8_t beta = 0;
     uint8_t sched_follow = 1;   // matches init's fresh-device default (Follow)
+    uint8_t  ota_auto = 0;
+    uint32_t ota_defer = 0, ota_shown = 0;
+    char     ota_skip[16] = "";   // matches app_state_t.ota_skip's size
     bool have_zone    = nvs_get_u8(h, "zone", &zone) == ESP_OK && zone < ZONE_COUNT;
     bool have_units   = nvs_get_u8(h, "units", &units) == ESP_OK;
     bool have_haptics = nvs_get_u8(h, "haptics", &haptics) == ESP_OK;
@@ -84,9 +91,15 @@ void dial_state_restore_prefs(void)
     bool have_bri_night = nvs_get_u8(h, "bri_night", &bri_night) == ESP_OK;
     bool have_beta      = nvs_get_u8(h, "beta", &beta) == ESP_OK;
     bool have_sched_follow = nvs_get_u8(h, "sched_follow", &sched_follow) == ESP_OK;
+    bool have_ota_auto  = nvs_get_u8(h, "ota_auto", &ota_auto) == ESP_OK;
+    bool have_ota_defer = nvs_get_u32(h, "ota_defer", &ota_defer) == ESP_OK;
+    bool have_ota_shown = nvs_get_u32(h, "ota_shown", &ota_shown) == ESP_OK;
+    size_t ota_skip_sz  = sizeof(ota_skip);
+    bool have_ota_skip  = nvs_get_str(h, "ota_skip", ota_skip, &ota_skip_sz) == ESP_OK;
     nvs_close(h);
     if (!have_zone && !have_units && !have_haptics && !have_rot && !have_rel
-        && !have_bri_day && !have_bri_night && !have_beta && !have_sched_follow) return;
+        && !have_bri_day && !have_bri_night && !have_beta && !have_sched_follow
+        && !have_ota_auto && !have_ota_defer && !have_ota_shown && !have_ota_skip) return;
 
     xSemaphoreTake(s_mux, portMAX_DELAY);
     if (have_zone) {
@@ -116,6 +129,10 @@ void dial_state_restore_prefs(void)
     if (have_bri_night) s_state.bri_night_pct = clamp_bri_pct(bri_night);
     if (have_beta)       s_state.beta         = (beta != 0);
     if (have_sched_follow) s_state.sched_follow = (sched_follow != 0);
+    if (have_ota_auto)   s_state.ota_auto  = (ota_auto <= 1) ? ota_auto : 0;
+    if (have_ota_defer)  s_state.ota_defer = ota_defer;
+    if (have_ota_shown)  s_state.ota_shown = ota_shown;
+    if (have_ota_skip)   strlcpy(s_state.ota_skip, ota_skip, sizeof(s_state.ota_skip));
     s_state.generation++;
     xSemaphoreGive(s_mux);
 }
@@ -417,6 +434,76 @@ void dial_state_set_sched_follow(bool follow)
         nvs_commit(h);
         nvs_close(h);
     }
+}
+
+void dial_state_set_ota_auto(uint8_t mode)
+{
+    mode = (mode <= 1) ? mode : 0;   // defend against a caller passing garbage; 0=Off is the safe fallback
+    xSemaphoreTake(s_mux, portMAX_DELAY);
+    s_state.ota_auto = mode;
+    s_state.generation++;
+    xSemaphoreGive(s_mux);
+
+    nvs_handle_t h;
+    if (nvs_open(NVS_NS, NVS_READWRITE, &h) == ESP_OK) {
+        nvs_set_u8(h, "ota_auto", mode);
+        nvs_commit(h);
+        nvs_close(h);
+    }
+}
+
+void dial_state_set_ota_defer(uint32_t epoch)
+{
+    xSemaphoreTake(s_mux, portMAX_DELAY);
+    s_state.ota_defer = epoch;
+    s_state.generation++;
+    xSemaphoreGive(s_mux);
+
+    nvs_handle_t h;
+    if (nvs_open(NVS_NS, NVS_READWRITE, &h) == ESP_OK) {
+        nvs_set_u32(h, "ota_defer", epoch);
+        nvs_commit(h);
+        nvs_close(h);
+    }
+}
+
+void dial_state_set_ota_skip(const char *version)
+{
+    xSemaphoreTake(s_mux, portMAX_DELAY);
+    strlcpy(s_state.ota_skip, version ? version : "", sizeof(s_state.ota_skip));
+    s_state.generation++;
+    xSemaphoreGive(s_mux);
+
+    nvs_handle_t h;
+    if (nvs_open(NVS_NS, NVS_READWRITE, &h) == ESP_OK) {
+        nvs_set_str(h, "ota_skip", version ? version : "");
+        nvs_commit(h);
+        nvs_close(h);
+    }
+}
+
+void dial_state_set_ota_shown(uint32_t epoch)
+{
+    xSemaphoreTake(s_mux, portMAX_DELAY);
+    s_state.ota_shown = epoch;
+    s_state.generation++;
+    xSemaphoreGive(s_mux);
+
+    nvs_handle_t h;
+    if (nvs_open(NVS_NS, NVS_READWRITE, &h) == ESP_OK) {
+        nvs_set_u32(h, "ota_shown", epoch);
+        nvs_commit(h);
+        nvs_close(h);
+    }
+}
+
+// Session-only, no NVS write -- see app_state_t.ota_prompt_due's comment.
+void dial_state_clear_ota_prompt_due(void)
+{
+    xSemaphoreTake(s_mux, portMAX_DELAY);
+    s_state.ota_prompt_due = false;
+    s_state.generation++;
+    xSemaphoreGive(s_mux);
 }
 
 void dial_cmd_post(const app_cmd_t *cmd)

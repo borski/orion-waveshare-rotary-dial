@@ -413,7 +413,41 @@ static void scenario_update(void)
     st->generation++;
     ui_router_go(SCR_UPDATE, NULL, LV_SCR_LOAD_ANIM_NONE);
     pump_ms(300);
+
+    // Knob-walked one row past the rotor's opening focus, onto "Check for
+    // updates" (Back(0) / Installed(1) / Check for updates(2) / Auto-update(3)
+    // / Skip this version(4) / Beta builds(5)) — brings docs/SPEC-update-prompt.md's
+    // two new rows into the neighbor band below it, so this one shot still
+    // documents the OTA-available status AND proves the new rows actually
+    // render (rather than adding a second persisted screenshot just for
+    // them). Auto-update set to Overnight and the version left unskipped so
+    // both show a real, non-blank value rather than their empty defaults.
+    st->ota_auto = 1;
+    st->generation++;
+    sim_knob(1);
+    pump_ms(300);
+    pump_until_idle(800);
     snapshot("update");
+}
+
+// The update-prompt sheet (docs/SPEC-update-prompt.md): the real firmware
+// only ever reaches this screen via nav_policy (the worker's idle-loop gate
+// raising ota_prompt_due while showing SCR_DIAL) — the simulator doesn't run
+// a nav policy at all, so this navigates there directly, same as every other
+// scenario, with an update pending so the sheet's copy has a real version to
+// show.
+static void scenario_update_prompt(void)
+{
+    apply_baseline();
+    app_state_t *st = sim_state_ptr();
+    st->ota.status = OTA_AVAILABLE;
+    snprintf(st->ota.latest, sizeof(st->ota.latest), "1.3.0");
+    st->generation++;
+    ui_router_go(SCR_UPDATE_PROMPT, (void *)(uintptr_t)ZONE_A, LV_SCR_LOAD_ANIM_NONE);
+    // Same idle-out-the-slide-anim gate scenario_quick uses for its sheet.
+    pump_ms(400);
+    pump_until_idle(1000);
+    snapshot("update-prompt");
 }
 
 static void scenario_settings(void)
@@ -547,6 +581,7 @@ int main(void)
     scenario_boost();
     scenario_menu();
     scenario_update();
+    scenario_update_prompt();
     scenario_settings();
     scenario_adjust_mode();
     scenario_brightness_menu();
@@ -556,6 +591,6 @@ int main(void)
     scenario_updating();
     scenario_standby();
 
-    printf("done: 22 screens rendered to %s\n", DIAL_SIM_OUTPUT_DIR);
+    printf("done: 23 screens rendered to %s\n", DIAL_SIM_OUTPUT_DIR);
     return 0;
 }

@@ -8,8 +8,12 @@
  * set_ui_temp, set_zone_on, set_ui_zone, set_welcomed, set_side_picked,
  * set_units_c, set_rel_mode, set_haptics_level, set_rotation, set_wifi_join,
  * clear_wifi_join_failed, set_phase, stamp_input, get/set_bri_day_pct,
- * get/set_bri_night_pct, set_beta, set_sched_follow, and dial_cmd_post (a
+ * get/set_bri_night_pct, set_beta, set_sched_follow, set_ota_auto,
+ * set_ota_defer, set_ota_skip, clear_ota_prompt_due, and dial_cmd_post (a
  * logging no-op — there is no worker task here to drain the queue).
+ * set_ota_shown is deliberately NOT here: only main.c's worker calls it
+ * (docs/SPEC-update-prompt.md's idle-loop gate evaluation), and the
+ * simulator has no worker task / doesn't link main.c at all.
  *
  * No mutex: this whole simulator is one thread pumping the LVGL tick, so
  * "under the store mutex" collapses to "just mutate the global."
@@ -32,6 +36,9 @@ void sim_state_reset(void)
     s_state.bri_night_pct = 100;  // so screenshots render scr_settings' new rows as "100%"
     s_state.haptics_level = 1;    // HAPTIC_LEVEL_AUTO — matches dial_state_init's default
     s_state.sched_follow = true;  // "Dial adjusts" default — matches dial_state_init's default
+    s_state.ota_auto = 0;         // Off — matches dial_state_init's fresh-device default
+    // ota_defer/ota_shown/ota_skip/ota_prompt_due all default to 0/""/false
+    // via the memset above, same as dial_state_init.
     s_state.generation = 1;
 }
 
@@ -115,6 +122,31 @@ void dial_state_set_beta(bool enabled)
 void dial_state_set_sched_follow(bool follow)
 {
     s_state.sched_follow = follow;
+    s_state.generation++;
+}
+
+void dial_state_set_ota_auto(uint8_t mode)
+{
+    s_state.ota_auto = (mode <= 1) ? mode : 0;
+    s_state.generation++;
+}
+
+void dial_state_set_ota_defer(uint32_t epoch)
+{
+    s_state.ota_defer = epoch;
+    s_state.generation++;
+}
+
+void dial_state_set_ota_skip(const char *version)
+{
+    strncpy(s_state.ota_skip, version ? version : "", sizeof(s_state.ota_skip) - 1);
+    s_state.ota_skip[sizeof(s_state.ota_skip) - 1] = '\0';
+    s_state.generation++;
+}
+
+void dial_state_clear_ota_prompt_due(void)
+{
+    s_state.ota_prompt_due = false;
     s_state.generation++;
 }
 

@@ -8,6 +8,8 @@
 #include <string.h>
 #include <stdio.h>
 #include "freertos/FreeRTOS.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 #include "esp_log.h"
 #include "esp_err.h"
 #include "esp_timer.h"
@@ -335,9 +337,22 @@ bool dial_ota_download_and_apply(void (*progress_cb)(int pct))
     esp_https_ota_config_t ota_cfg = { .http_config = &http_cfg };
 
     esp_https_ota_handle_t handle = NULL;
-    esp_err_t err = esp_https_ota_begin(&ota_cfg, &handle);
+    // One automatic retry before surfacing a failure. esp_https_ota_begin
+    // opens its own TLS session (with larger buffers than the rest of this
+    // firmware uses), and a first attempt was observed failing where an
+    // immediate retry succeeded -- most likely another session still winding
+    // down. A user watching a confirmed install should not be told "download
+    // start failed" for something that clears itself in a second; a genuinely
+    // unreachable server still fails, just twice.
+    esp_err_t err = ESP_FAIL;
+    for (int attempt = 0; attempt < 2; attempt++) {
+        err = esp_https_ota_begin(&ota_cfg, &handle);
+        if (err == ESP_OK) break;
+        ESP_LOGW(TAG, "esp_https_ota_begin: %s%s", esp_err_to_name(err),
+                 attempt == 0 ? " -- retrying once" : "");
+        if (attempt == 0) vTaskDelay(pdMS_TO_TICKS(1500));
+    }
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "esp_https_ota_begin: %s", esp_err_to_name(err));
         char msg[96];
         snprintf(msg, sizeof(msg), "download start failed: %s", esp_err_to_name(err));
         set_status(OTA_FAILED, NULL, msg);

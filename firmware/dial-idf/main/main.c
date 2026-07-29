@@ -16,6 +16,7 @@
  */
 #include <stdio.h>
 #include <string.h>
+#include <time.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "esp_timer.h"
@@ -227,6 +228,28 @@ static screen_id_t nav_policy(const app_state_t *st, void **arg)
             // no-op in ui_router_go (same id + same arg), so this is safe
             // every tick.
             screen_id_t cur = ui_router_current();
+
+            // Update prompt (docs/SPEC-update-prompt.md): the worker's idle
+            // loop raises ota_prompt_due only while EVERY gate in the spec's
+            // table holds, continuously re-checked (not a one-shot latch --
+            // see that loop's own comment), so the worker itself withdraws
+            // the offer the moment any gate stops holding (the user starts
+            // interacting -- idle time resets below the gate's floor -- the
+            // display dims, the account goes degraded, ...), at which point
+            // this falls through to the normal fallback below and lands back
+            // on SCR_DIAL/SCR_STANDBY same as any other abandoned sub-screen.
+            // ENTRY is scoped to SCR_DIAL specifically -- not Settings/Menu/
+            // Wi-Fi/etc. -- so a routine background flag can never yank the
+            // user out of a screen they navigated to on purpose (the same
+            // restraint every other branch below already applies to a
+            // routine poll landing); cur == SCR_UPDATE_PROMPT keeps it
+            // sticky once shown, same shape as QUICK/BOOST/SETTINGS below,
+            // so a poll landing mid-decision can't yank it away either.
+            if (st->ota_prompt_due && (cur == SCR_DIAL || cur == SCR_UPDATE_PROMPT)) {
+                *arg = (void *)(uintptr_t)st->ui_zone;
+                return SCR_UPDATE_PROMPT;
+            }
+
             // The menu face and its passive sub-screens (WIFI/ABOUT/UPDATE)
             // are reached by swipe/tap and join the sticky set below, but
             // unlike QUICK/BOOST/SETTINGS/BRIGHTNESS_MENU/ADJUST_MODE (which
@@ -587,6 +610,38 @@ static void commit_ota_snapshot(void)
     dial_ota_get(&info);
     dial_state_commit(mut_ota, &info);
 }
+
+// Update prompt (docs/SPEC-update-prompt.md). The worker RAISES
+// ota_prompt_due (via this mutator, see the idle loop's evaluation below);
+// scr_update_prompt.c LOWERS it directly (dial_state_clear_ota_prompt_due)
+// the instant the user acts — the same asymmetric set/clear split this file
+// already uses for fresh_device (set here) / welcomed (cleared by
+// scr_welcome.c).
+static void mut_ota_prompt_due(app_state_t *st, void *arg) { st->ota_prompt_due = *(bool *)arg; }
+
+// Auto-update two-strikes tracking (spec): worker-only, deliberately NOT
+// persisted to NVS or mirrored into app_state_t — a device that fails an
+// overnight install doesn't reboot (only a SUCCESSFUL apply does, via
+// esp_restart() below), so this naturally survives every retry across many
+// nights within one boot session; a rare manual power cycle just re-arms
+// it, which is fine either way ("retry the next day" already covers it).
+// The failure itself still surfaces on SCR_UPDATE — see the idle loop's
+// stale-failure auto-clear gate below — by simply leaving dial_ota's own
+// OTA_FAILED/.err alone (no new UI surface needed).
+static char s_ota_auto_fail_ver[16];
+static int  s_ota_auto_fail_count;
+// At most one auto-install attempt per overnight-window OCCURRENCE (success
+// or fail): latched the instant an attempt starts, re-armed when the clock
+// walks back outside the window so tomorrow's occurrence gets its own try —
+// without this, a failed attempt would retry every ~300ms for the rest of
+// the ~2h window instead of "the next day" (spec).
+static bool s_ota_auto_attempted;
+// Live "should the prompt sheet be showing right now" gate result, mirrored
+// into app_state_t.ota_prompt_due only on a false<->true transition — same
+// edge-triggered shape as s_ui_night/s_ui_clock_valid below, so a tick where
+// nothing changed doesn't bump the generation (and re-render everything)
+// for no reason.
+static bool s_ota_prompt_live;
 
 // OTA rollback health check (M6): dial_ota_mark_valid_if_pending() is
 // idempotent, but there's nothing left to confirm after the first success —
@@ -1353,8 +1408,22 @@ static void handle_immediate_cmd(const app_cmd_t *cmd, const oauth_disc_t *disc,
         app_state_t st;
         dial_state_get(&st);
         if (st.ota.status != OTA_AVAILABLE) break;
+        // This command only ever arrives from a deliberate, confirmed user
+        // tap (scr_update.c's tap-twice, or scr_update_prompt.c's "Update
+        // now") — never from the unattended overnight path below, which
+        // calls dial_ota_download_and_apply() directly. A human actively
+        // watching this install is exactly the case the auto-updater's
+        // two-failed-attempts brake (docs/SPEC-update-prompt.md) doesn't
+        // need to protect against, so a manual attempt always gets to try,
+        // and resets the strike count for next time the auto-updater looks.
+        s_ota_auto_fail_count = 0;
+        s_ota_auto_fail_ver[0] = 0;
         s_ota_last_committed_pct = -100;   // guarantee the first progress commit fires
-        dial_mcp_release_connection();   // one TLS session at a time
+        // Both clients hand their sockets back: the downloader opens its own
+        // TLS session with bigger buffers, and it should not have to compete
+        // with either of ours for memory (see dial_mcp_release_connection).
+        dial_mcp_release_connection();
+        dial_oauth_release_connection();
         bool ok = dial_ota_download_and_apply(ota_progress_cb);
         commit_ota_snapshot();
         if (ok) {
@@ -1686,14 +1755,20 @@ static void worker_task(void *arg)
         struct tm lt;
         if (dial_time_now(&lt)) {
             int now_min = lt.tm_hour * 60 + lt.tm_min;
-            bool night;
-            app_state_t sched_st;
-            dial_state_get(&sched_st);
-            const zone_state_t *za = &sched_st.zones[ZONE_A];
+            app_state_t st;
+            dial_state_get(&st);
+            const zone_state_t *za = &st.zones[ZONE_A];
+            // Hoisted out of the night-window `if` below (was local to it)
+            // so the update-prompt/auto-update blocks further down can reuse
+            // the same wakeup time instead of re-deriving it — see the spec's
+            // explicit instruction to reuse this exact night-flag machinery.
             int bed_min, wake_min;
-            if (za->sched_valid &&
+            bool have_sched = za->sched_valid &&
                 dial_parse_hhmm(za->sched_bedtime, &bed_min) &&
-                dial_parse_hhmm(za->sched_wakeup, &wake_min)) {
+                dial_parse_hhmm(za->sched_wakeup, &wake_min);
+
+            bool night;
+            if (have_sched) {
                 int start = ((bed_min - 30) % 1440 + 1440) % 1440;
                 int end   = (wake_min + 30) % 1440;
                 // The window almost always crosses midnight (bedtime ~21:00,
@@ -1711,6 +1786,104 @@ static void worker_task(void *arg)
                 s_ui_night = night;
                 dial_palette_set_night(night);
                 dial_state_commit(mut_bump, NULL);
+            }
+
+            // ---- Update prompt (docs/SPEC-update-prompt.md) -----------------
+            // Every row of the spec's gate table, live and re-evaluated every
+            // idle tick (~300ms) — committed to app_state_t only on a
+            // false<->true transition (mut_ota_prompt_due, edge-triggered
+            // exactly like s_ui_night above), so the worker itself withdraws
+            // the offer the instant any gate stops holding instead of a
+            // one-shot latch nav_policy would have to separately un-stick.
+            {
+                time_t   now_epoch = time(NULL);
+                int64_t  idle_us   = esp_timer_get_time() - dial_state_last_input_us();
+                bool want_prompt =
+                    st.ota.status == OTA_AVAILABLE &&
+                    strcmp(st.ota_skip, st.ota.latest) != 0 &&
+                    (uint32_t)now_epoch >= st.ota_defer &&
+                    (st.ota_shown == 0 || (uint32_t)now_epoch - st.ota_shown >= 24 * 3600) &&
+                    !night &&
+                    st.phase == PH_READY && st.have_state &&
+                    dial_power_level() == DPWR_ACTIVE && idle_us >= 3 * 1000000LL &&
+                    idle_us >= 10 * 1000000LL &&   // no knob detent / pending write recently
+                    clock_valid &&
+                    st.ota_auto == 0;   // Auto-update Off — if it's on, the dial handles it, don't ask
+                if (want_prompt != s_ota_prompt_live) {
+                    s_ota_prompt_live = want_prompt;
+                    dial_state_commit(mut_ota_prompt_due, &want_prompt);
+                    // Stamp the moment it's actually offered (rising edge
+                    // only) — this is the once-per-24h ceiling's own clock,
+                    // independent of "Later"'s separate ota_defer.
+                    if (want_prompt) dial_state_set_ota_shown((uint32_t)now_epoch);
+                }
+            }
+
+            // ---- Auto-update overnight install (docs/SPEC-update-prompt.md) -
+            // Reuses dial_ota_download_and_apply() directly — the exact same
+            // install path SCR_UPDATE's confirmed manual tap uses (CMD_OTA_APPLY
+            // in handle_immediate_cmd below), including the takeover screen if
+            // someone walks up mid-install (nav_policy's OTA check already
+            // forces SCR_UPDATING off ota.status alone, regardless of who
+            // started the download) and the v1.0.10 confirm-on-stable-boot
+            // behavior (ota_confirm_once, unchanged by this).
+            if (st.ota_auto == 1 && st.ota.status == OTA_AVAILABLE) {
+                int auto_start, auto_end;
+                if (have_sched) {
+                    auto_start = (wake_min + 60) % 1440;
+                    auto_end   = (wake_min + 180) % 1440;
+                } else {
+                    auto_start = 9 * 60;    // 09:00 fallback (spec)
+                    auto_end   = 11 * 60;   // 11:00 fallback (spec)
+                }
+                bool in_window = (auto_start <= auto_end)
+                    ? (now_min >= auto_start && now_min < auto_end)
+                    : (now_min >= auto_start || now_min < auto_end);
+
+                bool zones_off = true;
+                for (int z = 0; z < ZONE_COUNT; z++)
+                    if (st.zone_present[z] && st.zones[z].on) zones_off = false;
+
+                int64_t auto_idle_us = esp_timer_get_time() - dial_state_last_input_us();
+                bool eligible = in_window && !night && st.phase == PH_READY &&
+                                zones_off && auto_idle_us >= 30LL * 60 * 1000000;
+
+                if (!in_window) {
+                    s_ota_auto_attempted = false;   // window closed; re-arm for tomorrow's occurrence
+                } else if (eligible && !s_ota_auto_attempted) {
+                    s_ota_auto_attempted = true;    // at most one attempt per window, success or fail
+                    bool version_blocked = s_ota_auto_fail_ver[0] &&
+                        s_ota_auto_fail_count >= 2 &&
+                        strcmp(s_ota_auto_fail_ver, st.ota.latest) == 0;
+                    if (version_blocked) {
+                        ESP_LOGI(TAG, "auto-update: v%s blocked after 2 failed attempts -- skipping",
+                                 st.ota.latest);
+                    } else {
+                        ESP_LOGI(TAG, "auto-update: attempting v%s in the overnight window",
+                                 st.ota.latest);
+                        s_ota_last_committed_pct = -100;   // guarantee the first progress commit fires
+                        // Both clients hand their sockets back, same as the
+                        // manual CMD_OTA_APPLY path below.
+                        dial_mcp_release_connection();
+                        dial_oauth_release_connection();
+                        bool ok = dial_ota_download_and_apply(ota_progress_cb);
+                        commit_ota_snapshot();
+                        if (ok) {
+                            ESP_LOGI(TAG, "auto-update: image ready; rebooting into it");
+                            esp_restart();
+                        } else {
+                            dial_ota_info_t info;
+                            dial_ota_get(&info);
+                            if (strcmp(s_ota_auto_fail_ver, info.latest) != 0) {
+                                strlcpy(s_ota_auto_fail_ver, info.latest, sizeof(s_ota_auto_fail_ver));
+                                s_ota_auto_fail_count = 0;
+                            }
+                            s_ota_auto_fail_count++;
+                            ESP_LOGW(TAG, "auto-update: attempt %d failed for v%s",
+                                     s_ota_auto_fail_count, s_ota_auto_fail_ver);
+                        }
+                    }
+                }
             }
         }
 
@@ -1754,7 +1927,23 @@ static void worker_task(void *arg)
         // FAILED, or it's not stale yet) so it's cheap to leave ungated.
         // This is the belt to CMD_OTA_CLEAR_FAILED's suspenders: it's what
         // un-wedges the row even if the user never leaves Settings at all.
-        if (dial_ota_clear_stale_failure(OTA_FAILED_AUTOCLEAR_US)) commit_ota_snapshot();
+        //
+        // EXCEPT the two-failed-auto-installs case (docs/SPEC-update-prompt.md):
+        // an unattended nightly retry that just hit its second strike must
+        // leave a trace someone can actually find hours later on SCR_UPDATE,
+        // not have this 25s timer erase it before anyone's looked. That
+        // screen's own CMD_OTA_CLEAR_FAILED (posted on teardown) still clears
+        // it the moment the user actually visits — this only skips the
+        // silent, nobody-watching auto-clear.
+        {
+            dial_ota_info_t info;
+            dial_ota_get(&info);
+            bool blocked_and_failed = info.status == OTA_FAILED &&
+                s_ota_auto_fail_ver[0] && s_ota_auto_fail_count >= 2 &&
+                strcmp(s_ota_auto_fail_ver, info.latest) == 0;
+            if (!blocked_and_failed && dial_ota_clear_stale_failure(OTA_FAILED_AUTOCLEAR_US))
+                commit_ota_snapshot();
+        }
 
         // Auto-check for firmware updates (M6): at most once per uptime-day,
         // and only CHECKS (never applies) -- the settings row just gets a

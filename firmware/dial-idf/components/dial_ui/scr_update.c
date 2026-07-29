@@ -35,6 +35,8 @@ static lv_obj_t *s_title_lbl;
 static lv_obj_t *s_list;
 static lv_obj_t *s_val_ota;         // "Check for updates" row's value label, also the confirm target
 static lv_obj_t *s_ota_err_lbl;     // second line under that row, FAILED only
+static lv_obj_t *s_val_auto;        // "Auto-update" row's Off/Overnight value label
+static lv_obj_t *s_val_skip;        // "Skip this version" row's On/Off value label
 static lv_obj_t *s_val_beta;        // "Beta builds" row's On/Off value label
 
 // Confirm-tap state for "Check for updates"' AVAILABLE -> install path --
@@ -166,6 +168,43 @@ static void row_ota_cb(lv_event_t *e)
         dial_cmd_post(&cmd);
         return;
     }
+}
+
+// Auto-update (docs/SPEC-update-prompt.md): Off/Overnight, a plain binary
+// preference flip -- unlike "Dial adjusts" (which got its own explanation
+// screen because the consequence lands hours later and needs prose), this
+// is a simple standing choice with an obvious meaning, so a single tap
+// cycling it is enough (same shape as Beta builds below). The worker
+// (main.c's idle loop) reads it out of its own app_state_t snapshot the
+// same way it already reads beta/sched_follow -- nothing else to kick off
+// here.
+static void row_auto_cb(lv_event_t *e)
+{
+    (void)e;
+    app_state_t st;
+    dial_state_get(&st);
+    dial_haptics_play(HAPTIC_TICK);
+    dial_state_set_ota_auto(st.ota_auto ? 0 : 1);
+}
+
+// "Skip this version" (spec): only meaningful while an update is actually
+// AVAILABLE -- dial_list's rotor math (scroll-snap focus index) assumes a
+// fixed row count, so this row can't be dynamically added/removed the way
+// the spec's sketch shows it appearing/disappearing without risking the
+// knob's focus tracking on every other row in this list; it stays present
+// and simply goes inert (blank value, no-op tap) the rest of the time --
+// see render_skip_row's comment. Reversible by design (unlike the OTA
+// install itself): tapping an already-skipped version un-skips it, no
+// confirm needed either way.
+static void row_skip_cb(lv_event_t *e)
+{
+    (void)e;
+    app_state_t st;
+    dial_state_get(&st);
+    if ((dial_ota_status_t)st.ota.status != OTA_AVAILABLE) return;   // nothing to skip right now
+    dial_haptics_play(HAPTIC_TICK);
+    bool already_skipped = strcmp(st.ota_skip, st.ota.latest) == 0;
+    dial_state_set_ota_skip(already_skipped ? "" : st.ota.latest);
 }
 
 // Beta builds toggle. A plain preference flip (like Settings' Scale/Units
@@ -309,6 +348,8 @@ static void create(lv_obj_t *scr, void *arg)
     lv_label_set_long_mode(s_ota_err_lbl, LV_LABEL_LONG_DOT);
     lv_obj_align(s_ota_err_lbl, LV_ALIGN_LEFT_MID, 0, 26);
 
+    make_row(s_list, "Auto-update", row_auto_cb, &s_val_auto);
+    make_row(s_list, "Skip this version", row_skip_cb, &s_val_skip);
     make_row(s_list, "Beta builds", row_beta_cb, &s_val_beta);
 
     // Created AFTER the list so it draws over rows scrolling beneath it.
@@ -343,9 +384,26 @@ static void destroy(void)
     s_list = NULL;
     s_val_ota = NULL;
     s_ota_err_lbl = NULL;
+    s_val_auto = NULL;
+    s_val_skip = NULL;
     s_val_beta = NULL;
     s_ota_armed = false;
     s_ota_apply_sent = false;
+}
+
+// "Skip this version"'s value: only meaningful while AVAILABLE (spec) --
+// blank the rest of the time rather than hiding the row (see row_skip_cb's
+// comment on why this row can't be dynamically added/removed from a
+// dial_list rotor).
+static void render_skip_row(const app_state_t *st)
+{
+    if (!s_val_skip) return;
+    if ((dial_ota_status_t)st->ota.status != OTA_AVAILABLE) {
+        lv_label_set_text(s_val_skip, "");
+        return;
+    }
+    bool skipped = strcmp(st->ota_skip, st->ota.latest) == 0;
+    lv_label_set_text(s_val_skip, skipped ? "On" : "Off");
 }
 
 static void on_state(const app_state_t *st)
@@ -353,6 +411,8 @@ static void on_state(const app_state_t *st)
     if (!s_list) return;
     apply_palette(lv_obj_get_parent(s_list));
     render_ota_row(st);
+    if (s_val_auto) lv_label_set_text(s_val_auto, st->ota_auto ? "Overnight" : "Off");
+    render_skip_row(st);
     if (s_val_beta) lv_label_set_text(s_val_beta, st->beta ? "On" : "Off");
 }
 

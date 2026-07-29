@@ -337,6 +337,50 @@ typedef struct {
         bool pending_verify;
     } ota;
 
+    // --- Update prompt / auto-update (docs/SPEC-update-prompt.md) ---
+    // Auto-update setting (SCR_UPDATE's "Auto-update" row): 0 = Off,
+    // 1 = Overnight. Persisted to NVS "ui"/"ota_auto". Default 0 (Off) both
+    // here and on an NVS-absent restore -- spec's explicit consent
+    // requirement (a device that silently reboots itself must not surprise
+    // someone who never asked for it). Not a bool/haptics_level-style enum
+    // mirror of anything in dial_ota.h -- this preference is dial_state's own,
+    // dial_ota has no concept of "overnight".
+    uint8_t ota_auto;
+    // "Later" defer timestamp: an epoch-seconds wall clock value (survives
+    // reboots correctly, unlike an uptime timer) before which the update
+    // prompt must not be shown again. Persisted to NVS "ui"/"ota_defer".
+    // Default 0, which is always in the past -- a fresh device has nothing
+    // to defer. Set to now+23h (deliberately not 24h -- see the spec) by
+    // scr_update_prompt.c's "Later" action and its swipe-dismiss equivalent.
+    uint32_t ota_defer;
+    // Exact version string ("X.Y.Z"/"X.Y.Z-beta.N") the user chose to skip
+    // via SCR_UPDATE's "Skip this version" row -- an EXACT match against
+    // ota.latest suppresses the prompt for that version only; anything
+    // newer (a different string) prompts again. Persisted to NVS
+    // "ui"/"ota_skip". Default "" (nothing skipped).
+    char ota_skip[16];
+    // Epoch seconds the update prompt was last actually shown -- the
+    // once-per-24h ceiling on prompt frequency, independent of "Later"'s own
+    // defer window (a device that's never been shown the prompt has this at
+    // 0, which is always >=24h in the past). Persisted to NVS "ui"/"ota_shown".
+    // Committed by the worker (main.c) the instant it raises ota_prompt_due
+    // below -- see dial_state_set_ota_shown.
+    uint32_t ota_shown;
+    // Session-only (deliberately NOT persisted): the LIVE "should the update
+    // prompt sheet be showing right now" gate result, continuously
+    // re-evaluated by the worker's idle loop (main.c) and committed only on
+    // change (mirrors s_ui_night's edge-triggered pattern) -- so the worker
+    // itself withdraws the offer the instant any gate stops holding (the
+    // user starts interacting, the display dims, the account goes degraded,
+    // ...) rather than a one-shot latch that could get stuck open.
+    // nav_policy routes to SCR_UPDATE_PROMPT exactly when this is true (and
+    // the dial face is what's showing -- see nav_policy's own comment for
+    // why it's scoped to SCR_DIAL). Cleared immediately by
+    // scr_update_prompt.c on every exit path (Update now / Later / Update
+    // options / swipe-dismiss) via dial_state_clear_ota_prompt_due(), so a
+    // deliberate dismissal can never race the worker's own next tick.
+    bool ota_prompt_due;
+
     // Bumped on every commit; the UI dispatcher re-renders when it changes.
     uint32_t generation;
 } app_state_t;
@@ -441,6 +485,24 @@ void dial_state_set_beta(bool enabled);
 // "ui"/"sched_follow".
 bool dial_state_get_sched_follow(void);
 void dial_state_set_sched_follow(bool follow);
+
+// --- Update prompt / auto-update (see app_state_t's comments above for what
+// each field means and its NVS key). All four setters persist immediately,
+// same shape as dial_state_set_beta -- callers are rare taps in the LVGL
+// task (SCR_UPDATE's Auto-update/Skip rows, scr_update_prompt.c's Later
+// action), except dial_state_set_ota_shown, which the WORKER calls the
+// instant it raises ota_prompt_due (main.c's idle loop; a ~ms NVS write
+// there is fine, it happens at most once a day).
+void dial_state_set_ota_auto(uint8_t mode);
+void dial_state_set_ota_defer(uint32_t epoch);
+void dial_state_set_ota_skip(const char *version);
+void dial_state_set_ota_shown(uint32_t epoch);
+
+// Clears the session-only ota_prompt_due flag (see app_state_t's comment).
+// Called directly from the LVGL task by scr_update_prompt.c's every exit
+// path -- NOT persisted, no NVS write, just an immediate commit (same shape
+// as dial_state_set_welcomed).
+void dial_state_clear_ota_prompt_due(void);
 
 // Screen rotation, quarter turns clockwise (0..3). Persisted; apply it to the
 // panel with dial_display_set_rotation.
