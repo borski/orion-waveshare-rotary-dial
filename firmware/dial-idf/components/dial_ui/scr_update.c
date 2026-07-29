@@ -36,7 +36,8 @@ static lv_obj_t *s_list;
 static lv_obj_t *s_val_ota;         // "Check for updates" row's value label, also the confirm target
 static lv_obj_t *s_ota_err_lbl;     // second line under that row, FAILED only
 static lv_obj_t *s_val_auto;        // "Auto-update" row's Off/Overnight value label
-static lv_obj_t *s_val_skip;        // "Skip this version" row's On/Off value label
+static lv_obj_t *s_val_skip;        // "Skip <version>" row's value label ("" / "Skipped")
+static lv_obj_t *s_row_skip;        // the row itself: created/destroyed with availability
 static lv_obj_t *s_val_beta;        // "Beta builds" row's On/Off value label
 
 // Confirm-tap state for "Check for updates"' AVAILABLE -> install path --
@@ -207,6 +208,17 @@ static void row_skip_cb(lv_event_t *e)
     dial_state_set_ota_skip(already_skipped ? "" : st.ota.latest);
 }
 
+// Label carries the version itself ("Skip 1.2.0-beta.3"), so the row states
+// exactly what it will do without leaning on the row above for context.
+static lv_obj_t *make_skip_row(lv_obj_t *list, const app_state_t *st)
+{
+    char label[32];
+    snprintf(label, sizeof label, "Skip %s",
+             st->ota.latest[0] ? st->ota.latest : "this version");
+    s_row_skip = make_row(list, label, row_skip_cb, &s_val_skip);
+    return s_row_skip;
+}
+
 // Beta builds toggle. A plain preference flip (like Settings' Scale/Units
 // rows) -- persisting is dial_state_set_beta's job, and the worker picks it
 // up on its own next dial_ota_check() call, so there's nothing else to kick
@@ -305,6 +317,8 @@ static void create(lv_obj_t *scr, void *arg)
     (void)arg;
     s_ota_armed = false;
     s_ota_apply_sent = false;
+    app_state_t st_now;
+    dial_state_get(&st_now);
     const dial_palette_t *pal = PAL();
     lv_obj_set_style_bg_color(scr, pal->bg, 0);
 
@@ -312,17 +326,6 @@ static void create(lv_obj_t *scr, void *arg)
 
     make_row(s_list, LV_SYMBOL_LEFT "  Back", row_back_cb, NULL);
 
-    // What this dial is running right now, above the row that offers to
-    // change it (owner request): deciding whether to install is a comparison,
-    // and About is the wrong place to have to go looking for half of it.
-    // Read-only, so no callback.
-    {
-        lv_obj_t *ver_val;
-        make_row(s_list, "Installed", NULL, &ver_val);
-        char v[24];
-        snprintf(v, sizeof v, "v%s", esp_app_get_description()->version);
-        lv_label_set_text(ver_val, v);
-    }
 
     // Unlike a plain label+value row, this one carries worker-driven prose
     // that can run long ("Tap again to confirm", "v1.2.3 available - tap to
@@ -348,8 +351,30 @@ static void create(lv_obj_t *scr, void *arg)
     lv_label_set_long_mode(s_ota_err_lbl, LV_LABEL_LONG_DOT);
     lv_obj_align(s_ota_err_lbl, LV_ALIGN_LEFT_MID, 0, 26);
 
+
+    // What this dial is running right now, above the row that offers to
+    // change it (owner request): deciding whether to install is a comparison,
+    // and About is the wrong place to have to go looking for half of it.
+    // Read-only, so no callback.
+    {
+        lv_obj_t *ver_val;
+        make_row(s_list, "Installed", NULL, &ver_val);
+        char v[24];
+        snprintf(v, sizeof v, "v%s", esp_app_get_description()->version);
+        lv_label_set_text(ver_val, v);
+    }
+    if ((dial_ota_status_t)st_now.ota.status == OTA_AVAILABLE)
+        make_skip_row(s_list, &st_now);
+
     make_row(s_list, "Auto-update", row_auto_cb, &s_val_auto);
-    make_row(s_list, "Skip this version", row_skip_cb, &s_val_skip);
+    // Conditional: a "Skip this version" row with no version to skip is an
+    // orphan control -- it reads as broken, and its inert tap confirms it
+    // (owner feedback). It exists only while there IS a pending version, and
+    // names it, so the row is self-explaining wherever it appears. Rebuilt
+    // rather than hidden: dial_list's rotor snap derives its geometry from
+    // raw child count, so a HIDDEN row still occupies a knob position while
+    // occupying no pixels -- add/remove keeps count and visible rows in
+    // agreement (same reason SCR_MENU's install row had to change).
     make_row(s_list, "Beta builds", row_beta_cb, &s_val_beta);
 
     // Created AFTER the list so it draws over rows scrolling beneath it.
@@ -359,7 +384,7 @@ static void create(lv_obj_t *scr, void *arg)
     lv_obj_align(s_title_lbl, LV_ALIGN_CENTER, 0, 64 - CY);
 
     apply_palette(scr);
-    dial_list_settle(s_list, 1);   // open on "Check for updates", not on Back
+    dial_list_settle(s_list, 1);   // open on "Check for updates" (row 1), not on Back
     s_confirm_timer = lv_timer_create(confirm_timer_cb, 250, NULL);
 }
 
@@ -386,6 +411,7 @@ static void destroy(void)
     s_ota_err_lbl = NULL;
     s_val_auto = NULL;
     s_val_skip = NULL;
+    s_row_skip = NULL;
     s_val_beta = NULL;
     s_ota_armed = false;
     s_ota_apply_sent = false;
@@ -397,13 +423,14 @@ static void destroy(void)
 // dial_list rotor).
 static void render_skip_row(const app_state_t *st)
 {
+    // The row itself only exists while an update is pending (see on_state's
+    // add/remove), so there is no "nothing to skip" case to render here.
     if (!s_val_skip) return;
-    if ((dial_ota_status_t)st->ota.status != OTA_AVAILABLE) {
-        lv_label_set_text(s_val_skip, "");
-        return;
-    }
     bool skipped = strcmp(st->ota_skip, st->ota.latest) == 0;
-    lv_label_set_text(s_val_skip, skipped ? "On" : "Off");
+    // "Skipped" / blank, not On/Off: this row performs an action on a
+    // specific version, and On/Off invites reading it as a standing setting
+    // like the two toggles above it.
+    lv_label_set_text(s_val_skip, skipped ? "Skipped" : "");
 }
 
 static void on_state(const app_state_t *st)
@@ -412,6 +439,26 @@ static void on_state(const app_state_t *st)
     apply_palette(lv_obj_get_parent(s_list));
     render_ota_row(st);
     if (s_val_auto) lv_label_set_text(s_val_auto, st->ota_auto ? "Overnight" : "Off");
+
+    // A check that lands WHILE this screen is open flips availability under
+    // the user, so the row has to appear/disappear live rather than only on
+    // the next visit -- tapping "Check for updates" and watching the skip
+    // row show up is the common path, not an edge case.
+    bool want_skip = (dial_ota_status_t)st->ota.status == OTA_AVAILABLE;
+    if (want_skip && !s_row_skip) {
+        make_skip_row(s_list, st);
+        // Appended at the end; belongs directly under "Installed", with the
+        // version it acts on, rather than adrift among the standing toggles.
+        lv_obj_move_to_index(s_row_skip, (int32_t)lv_obj_get_child_cnt(s_list) - 3);
+        lv_obj_update_layout(s_list);
+        lv_event_send(s_list, LV_EVENT_SCROLL, NULL);   // re-run dial_list's zoom/fade pass
+    } else if (!want_skip && s_row_skip) {
+        lv_obj_del(s_row_skip);
+        s_row_skip = NULL;
+        s_val_skip = NULL;
+        lv_obj_update_layout(s_list);
+        lv_event_send(s_list, LV_EVENT_SCROLL, NULL);
+    }
     render_skip_row(st);
     if (s_val_beta) lv_label_set_text(s_val_beta, st->beta ? "On" : "Off");
 }
