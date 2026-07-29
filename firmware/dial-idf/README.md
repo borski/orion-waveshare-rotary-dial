@@ -164,7 +164,6 @@ itself:
   menu. Swipe right on any menu sub-screen (or tap its "Back" row) returns to
   the menu. A long-press on the dial screen opens quick actions (bed off,
   boost heat/cool, etc.).
-- **Menu → Tonight:** tonight's schedule and a one-night override.
 - **Menu → Settings:** temperature scale (Absolute °F/°C, or Orion's −10…+10
   relative levels), units (°C/°F, used for the absolute readouts), screen
   rotation, haptics on/off, and two
@@ -246,9 +245,9 @@ Implemented and working end-to-end:
   NVS token storage, 401-triggered refresh) against Orion's MCP server.
 - MCP-over-HTTPS device control: reading live zone state, setting
   temperature/on-off, thermal-relief boost, away mode, "match my side",
-  tonight's sleep schedule + one-night override.
+  and the sleep schedule that times overnight temperature writes.
 - Onboarding flow (welcome splash → Wi-Fi → OAuth link → side pick → dial),
-  a menu face with Tonight/Settings/Wi-Fi/About sub-screens, day/night
+  a menu face with Settings/Wi-Fi/About sub-screens, day/night
   palette, haptics, screen rotation, and single- vs. dual-zone topper
   support.
 - OTA updates from this repo's GitHub releases, with bootloader

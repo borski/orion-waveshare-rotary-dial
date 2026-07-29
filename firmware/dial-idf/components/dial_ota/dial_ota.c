@@ -176,6 +176,8 @@ static bool release_version(cJSON *rel, char *out, size_t out_sz)
     return true;
 }
 
+void dial_ota_mark_checking(void) { set_status(OTA_CHECKING, NULL, NULL); }
+
 bool dial_ota_check(bool beta)
 {
     set_status(OTA_CHECKING, NULL, NULL);

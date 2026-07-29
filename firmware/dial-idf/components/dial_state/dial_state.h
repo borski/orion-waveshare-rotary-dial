@@ -115,10 +115,9 @@ static inline int dial_rel_step(int f, int detents)
 }
 
 // Parse a schedule "HH:MM" (24h) time string into minutes-from-midnight.
-// Returns false (leaving *out_min untouched) on any malformed input. Shared
-// by the worker (real night-window calc) and SCR_TONIGHT (display + the wake
-// picker), both of which only ever look at zone_state_t's sched_bedtime/
-// sched_wakeup strings below.
+// Returns false (leaving *out_min untouched) on any malformed input. Used by
+// the worker's real night-window calc (main.c's sleep_phase_now()), which
+// only ever looks at zone_state_t's sched_bedtime/sched_wakeup strings below.
 static inline bool dial_parse_hhmm(const char *s, int *out_min)
 {
     int hh, mm;
@@ -354,8 +353,9 @@ static inline bool dial_state_is_dual(const app_state_t *st)
 }
 
 // The zone a single-zone device actually has (and, on a dual device, the side
-// whose schedule the Tonight face speaks for). ZONE_A unless the device reports
-// only ZONE_B.
+// whose schedule the worker's overnight write-path logic follows — see
+// sleep_phase_now()/temp_write_phase() in main.c). ZONE_A unless the device
+// reports only ZONE_B.
 static inline zone_idx_t dial_state_primary_zone(const app_state_t *st)
 {
     return (!st->zone_present[ZONE_A] && st->zone_present[ZONE_B]) ? ZONE_B : ZONE_A;

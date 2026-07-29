@@ -65,6 +65,14 @@ void dial_ota_get(dial_ota_info_t *out);
 // (network/parse error, see .err). Worker task only. `beta` is the caller's
 // current dial_state_t.beta snapshot -- this component doesn't depend on
 // dial_state, so the caller decides the channel on every call.
+// Publish OTA_CHECKING before a (blocking, seconds-long) dial_ota_check().
+// The check sets that status itself, but the worker only mirrors dial_ota
+// state into app_state_t AFTER the call returns, so the UI would otherwise
+// jump straight from idle to the result with no sign anything happened --
+// a tap that looks like a dead button. Call this, commit the snapshot, then
+// check.
+void dial_ota_mark_checking(void);
+
 bool dial_ota_check(bool beta);
 
 // Blocking: esp_https_ota the asset URL captured by the last dial_ota_check

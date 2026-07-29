@@ -379,54 +379,13 @@ static void scenario_boost(void)
     snapshot("boost");
 }
 
-static void scenario_tonight(void)
-{
-    apply_baseline();
-    app_state_t *st = sim_state_ptr();
-    zone_state_t *a = &st->zones[ZONE_A];   // primary zone; Tonight always shows it
-    a->sched_valid = true;
-    snprintf(a->sched_bedtime, sizeof(a->sched_bedtime), "22:30");
-    a->sched_bedtime_temp_c = 19.0f;   // -> 66F
-    snprintf(a->sched_wakeup, sizeof(a->sched_wakeup), "06:30");
-    a->sched_wakeup_temp_c = 21.0f;    // -> 70F
-    a->sched_override_applied = false;
-    a->sched_override_available = true;
-    ui_router_go(SCR_TONIGHT, NULL, LV_SCR_LOAD_ANIM_NONE);
-    pump_ms(300);
-    snapshot("tonight");
-}
-
-// Tonight in RELATIVE scale — proves the two-label schedule rows render levels
-// cleanly (no "22:30 - -3" double hyphen) and that a negative level draws.
-static void scenario_tonight_relative(void)
-{
-    apply_baseline();
-    app_state_t *st = sim_state_ptr();
-    st->rel_mode = true;
-    zone_state_t *a = &st->zones[ZONE_A];
-    a->sched_valid = true;
-    snprintf(a->sched_bedtime, sizeof(a->sched_bedtime), "22:30");
-    a->sched_bedtime_temp_c = 19.0f;   // -> level -5
-    snprintf(a->sched_wakeup, sizeof(a->sched_wakeup), "06:30");
-    a->sched_wakeup_temp_c = 29.0f;    // -> level +1
-    a->sched_override_applied = false;
-    a->sched_override_available = true;
-    // This scenario reuses SCR_TONIGHT/NULL straight after scenario_tonight, so
-    // ui_router_go is a no-op (same id+arg). Bump generation so the dispatcher
-    // re-renders the live screen with this (relative) state.
-    st->generation++;
-    ui_router_go(SCR_TONIGHT, NULL, LV_SCR_LOAD_ANIM_NONE);
-    pump_ms(300);
-    snapshot("tonight-relative");
-}
-
 // Also documents the M7 permanent "Update" row (replaces the M6 conditional
 // "Install X.Y.Z" row — confirmation moved into SCR_UPDATE itself, this row
 // is now pure navigation): sets the OTA status to available with a pending
 // version before navigating, then knob-walks focus down onto the row itself
-// (Back/Tonight/Settings/Wi-Fi/About/Update — 4 detents past the "Tonight"
-// the list opens on) so menu.png actually shows the version badge it's
-// meant to document, not just proves it doesn't crash off-frame.
+// (Back/Settings/Update/Wi-Fi/About — 1 detent past the "Settings" the list
+// opens on) so menu.png actually shows the version badge it's meant to
+// document, not just proves it doesn't crash off-frame.
 static void scenario_menu(void)
 {
     apply_baseline();
@@ -436,7 +395,7 @@ static void scenario_menu(void)
     st->generation++;
     ui_router_go(SCR_MENU, NULL, LV_SCR_LOAD_ANIM_NONE);
     pump_ms(300);
-    sim_knob(4);           // Tonight -> Update (badge: "1.0.10")
+    sim_knob(1);            // Settings -> Update (badge: "1.0.10")
     pump_ms(300);
     pump_until_idle(800);  // rotor snap is an lv_anim; land before the capture
     snapshot("menu");
@@ -463,6 +422,19 @@ static void scenario_settings(void)
     ui_router_go(SCR_SETTINGS, NULL, LV_SCR_LOAD_ANIM_NONE);
     pump_ms(300);
     snapshot("settings");
+}
+
+// The Adjustment mode choice screen, reached from Settings' "Adjustment
+// mode" row: apply_baseline() doesn't touch sched_follow, and
+// sim_state_reset() left it at its fresh-device default (true = Schedule),
+// so this renders with no extra state poking — Schedule selected, its
+// description visible below the two options.
+static void scenario_adjust_mode(void)
+{
+    apply_baseline();
+    ui_router_go(SCR_ADJUST_MODE, NULL, LV_SCR_LOAD_ANIM_NONE);
+    pump_ms(300);
+    snapshot("adjust-mode");
 }
 
 // The Brightness submenu (M7, collapses Settings' old separate Day/Night
@@ -573,11 +545,10 @@ int main(void)
     scenario_dial_relative();
     scenario_quick();
     scenario_boost();
-    scenario_tonight();
-    scenario_tonight_relative();
     scenario_menu();
     scenario_update();
     scenario_settings();
+    scenario_adjust_mode();
     scenario_brightness_menu();
     scenario_settings_brightness();
     scenario_wifi_info();
@@ -585,6 +556,6 @@ int main(void)
     scenario_updating();
     scenario_standby();
 
-    printf("done: 23 screens rendered to %s\n", DIAL_SIM_OUTPUT_DIR);
+    printf("done: 22 screens rendered to %s\n", DIAL_SIM_OUTPUT_DIR);
     return 0;
 }

@@ -1,11 +1,10 @@
 /*
- * SCR_MENU — the third face of the swipe chain, replacing the old spot
- * Tonight used to occupy directly off Dial(B) (chain is now
- * Dial(A) <-left- Dial(B) <-left- Menu). Tonight/Settings/Wi-Fi/About/Update
- * are no longer faces of the chain themselves: they're sub-screens one tap
- * off this list, each dismissed by swiping RIGHT back to here rather than
- * all the way to Dial(B). That indirection exists so the chain stays a
- * fixed 3 faces regardless of how many settings-ish screens accumulate.
+ * SCR_MENU — the third face of the swipe chain (chain is
+ * Dial(A) <-left- Dial(B) <-left- Menu). Settings/Update/Wi-Fi/About are not
+ * faces of the chain themselves: they're sub-screens one tap off this list,
+ * each dismissed by swiping RIGHT back to here rather than all the way to
+ * Dial(B). That indirection exists so the chain stays a fixed 3 faces
+ * regardless of how many settings-ish screens accumulate.
  *
  * No title label: the focused row IS the heading, and the page dots are
  * what tell you you're on face 3 of 3 — a heading would either crowd a row
@@ -14,6 +13,13 @@
  * The rows live in a rotor list (dial_list.h): one row snaps focused to the
  * vertical center, neighbors shrink/fade toward the bezel, and the knob
  * walks focus one row per detent.
+ *
+ * Row order (owner-approved): Back, Settings, Update, Wi-Fi, About. The
+ * rotor opens focused on the first row after Back (dial_list_settle(s_list,
+ * 1) below), so that slot belongs to whatever destination gets used most —
+ * Settings, not a one-off reference screen. Update moved up from last for
+ * the same reason (it's the row you come back to check on); Wi-Fi and About
+ * are post-setup reference material and sink to the bottom.
  *
  * "Update" is a PERMANENT row (M7), adjacent to About — unlike the M6
  * "Install X.Y.Z" row it replaces, it always exists and never arms a
@@ -100,7 +106,7 @@ static lv_obj_t *make_row(lv_obj_t *parent, const char *label_txt, screen_id_t d
  * same row_event_cb every other row uses — no confirm, no install command
  * posted from here). That's a deliberate split from the old row: the owner
  * wants the submenu to be where OTA is actually confirmed, and this row is
- * pure discoverability + navigation, matching About/Wi-Fi/Settings/Tonight.
+ * pure discoverability + navigation, matching About/Wi-Fi/Settings.
  *
  * Its value label is the one dynamic part — a small left-label/right-value
  * pair inside the same pill-row look the other rows use, rather than a
@@ -202,9 +208,9 @@ static void create(lv_obj_t *scr, void *arg)
     const dial_palette_t *pal = PAL();
     lv_obj_set_style_bg_color(scr, pal->bg, 0);
 
-    // Chassis hairline ring — identical geometry to scr_tonight's/
-    // scr_standby's: every face is the same chassis object, just a
-    // different face of it (design-spec.md's "a chassis that persists").
+    // Chassis hairline ring — identical geometry to scr_standby's: every
+    // face is the same chassis object, just a different face of it
+    // (design-spec.md's "a chassis that persists").
     s_ring = lv_arc_create(scr);
     lv_obj_set_size(s_ring, 2 * ARC_R, 2 * ARC_R);
     lv_obj_center(s_ring);
@@ -222,11 +228,10 @@ static void create(lv_obj_t *scr, void *arg)
     dial_state_get(&st);
 
     make_row(s_list, LV_SYMBOL_LEFT "  Back", SCR_DIAL);
-    make_row(s_list, "Tonight",  SCR_TONIGHT);
     make_row(s_list, "Settings", SCR_SETTINGS);
+    make_update_row(s_list, &st);
     make_row(s_list, "Wi-Fi",    SCR_WIFI);
     make_row(s_list, "About",    SCR_ABOUT);
-    make_update_row(s_list, &st);
 
     s_dot_a = lv_obj_create(scr);
     lv_obj_set_size(s_dot_a, 6, 6);
@@ -250,7 +255,7 @@ static void create(lv_obj_t *scr, void *arg)
     lv_obj_align(s_dot_menu, LV_ALIGN_CENTER, 196 - CX, 340 - CY);
 
     apply_palette(&st);
-    dial_list_settle(s_list, 1);   // open on "Tonight", not on Back
+    dial_list_settle(s_list, 1);   // open on "Settings", not on Back
 }
 
 static void destroy(void)

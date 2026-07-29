@@ -106,7 +106,7 @@ static void create(lv_obj_t *scr, void *arg)
     lv_obj_set_style_arc_rounded(s_arc, true, LV_PART_INDICATOR);
     // Kill the default theme's knob dot at the indicator's leading edge — a
     // knob is a drag handle, and nothing about a progress ring is draggable.
-    // Same suppression scr_menu/scr_standby/scr_tonight apply to their rings.
+    // Same suppression scr_menu/scr_standby/scr_adjust_mode apply to their rings.
     lv_obj_set_style_bg_opa(s_arc, LV_OPA_TRANSP, LV_PART_KNOB);
     // Locked screen: nothing here is draggable or tappable.
     lv_obj_clear_flag(s_arc, LV_OBJ_FLAG_CLICKABLE);

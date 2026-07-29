@@ -107,15 +107,15 @@ board bring-up notes, and firmware architecture live in
 <td align="center">Boost</td>
 </tr>
 <tr>
-<td align="center"><img src="docs/screens/tonight.png" width="170" alt="Tonight's schedule screen"></td>
 <td align="center"><img src="docs/screens/menu.png" width="170" alt="Menu screen"></td>
 <td align="center"><img src="docs/screens/settings.png" width="170" alt="Settings screen"></td>
+<td align="center"><img src="docs/screens/adjust-mode.png" width="170" alt="Adjustment mode screen"></td>
 <td align="center"><img src="docs/screens/standby.png" width="170" alt="Standby clock face"></td>
 </tr>
 <tr>
-<td align="center">Tonight's schedule</td>
 <td align="center">Menu</td>
 <td align="center">Settings</td>
+<td align="center">Adjustment mode</td>
 <td align="center">Standby clock</td>
 </tr>
 </table>

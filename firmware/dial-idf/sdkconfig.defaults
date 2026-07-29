@@ -47,3 +47,12 @@ CONFIG_ESPTOOLPY_FLASHSIZE="16MB"
 # a real margin; the main task is deleted once app_main returns, so this is
 # transient boot RAM, not a permanent cost.
 CONFIG_ESP_MAIN_TASK_STACK_SIZE=6144
+
+# TLS buffers out of scarce internal RAM and into the 8MB PSRAM. Without this
+# a second concurrent TLS session (the OTA client opening a GitHub connection
+# while the MCP client holds Orion's) fails its handshake outright for want of
+# internal memory -- diagnosed twice on 2026-07-28, once as "Orion
+# unreachable" and once as "check failed (HTTP -1)". The one-session-at-a-time
+# discipline in dial_mcp_release_connection() stays as defense in depth; this
+# removes the underlying constraint.
+CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC=y

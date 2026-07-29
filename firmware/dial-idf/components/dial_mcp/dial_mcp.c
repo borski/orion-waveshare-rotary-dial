@@ -106,6 +106,8 @@ static void http_close(void)
     }
 }
 
+void dial_mcp_release_connection(void) { http_close(); }
+
 static bool http_open(void)
 {
     if (s_http) return true;

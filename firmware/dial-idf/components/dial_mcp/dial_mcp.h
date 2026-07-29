@@ -27,6 +27,16 @@ int dial_mcp_list_tools_count(void);
 // Caller frees. Returns false on transport / JSON-RPC / tool error.
 bool dial_mcp_call_tool(const char *name, const char *args_json, char **result_out);
 
+// Drop this component's kept-alive connection. TLS sessions on this build
+// allocate their buffers from INTERNAL RAM (MBEDTLS_EXTERNAL_MEM_ALLOC is
+// off), which is scarce enough that a second concurrent session can fail its
+// handshake outright -- that is what made "Check for updates" return HTTP -1
+// while the dial was linked, and it is the same condition that broke linking
+// itself when dial_oauth and this client overlapped (2026-07-28). Callers
+// that are about to open an unrelated HTTPS connection (the OTA client) drop
+// this one first; the next rpc() transparently reopens it.
+void dial_mcp_release_connection(void);
+
 // The most recent MCP error (HTTP status or JSON-RPC message), for display.
 const char *dial_mcp_last_error(void);
 

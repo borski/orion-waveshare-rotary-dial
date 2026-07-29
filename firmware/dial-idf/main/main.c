@@ -227,9 +227,9 @@ static screen_id_t nav_policy(const app_state_t *st, void **arg)
             // no-op in ui_router_go (same id + same arg), so this is safe
             // every tick.
             screen_id_t cur = ui_router_current();
-            // The menu face and its passive sub-screens (TONIGHT/WIFI/ABOUT/
-            // UPDATE) are reached by swipe/tap and join the sticky set
-            // below, but unlike QUICK/BOOST/SETTINGS/BRIGHTNESS_MENU (which
+            // The menu face and its passive sub-screens (WIFI/ABOUT/UPDATE)
+            // are reached by swipe/tap and join the sticky set below, but
+            // unlike QUICK/BOOST/SETTINGS/BRIGHTNESS_MENU/ADJUST_MODE (which
             // only leave via a deliberate user action) they're also
             // dismissed by the standby idle timeout — someone can swipe
             // there and fall asleep on it — so that check must win over
@@ -238,14 +238,18 @@ static screen_id_t nav_policy(const app_state_t *st, void **arg)
             // was already here) — it's the one sub-screen where getting
             // yanked away mid-check/mid-confirm by a routine poll commit
             // would be user-visibly broken, not just an inconvenience.
-            bool passive = cur == SCR_MENU || cur == SCR_TONIGHT ||
+            bool passive = cur == SCR_MENU ||
                            cur == SCR_WIFI || cur == SCR_ABOUT || cur == SCR_UPDATE;
             if (passive && dial_power_level() == DPWR_STANDBY) {
                 *arg = (void *)(uintptr_t)st->ui_zone;
                 return SCR_STANDBY;
             }
+            // ADJUST_MODE joins BRIGHTNESS_MENU here (not the idle-dismissed
+            // passive set above): both are Settings sub-screens reached by a
+            // deliberate tap, and a routine poll landing mid-choice must not
+            // yank the user off either one.
             if (passive || cur == SCR_QUICK || cur == SCR_BOOST || cur == SCR_SETTINGS ||
-                cur == SCR_BRIGHTNESS_MENU) return cur;
+                cur == SCR_BRIGHTNESS_MENU || cur == SCR_ADJUST_MODE) return cur;
             // First link on a fresh device: pick a default side before showing
             // the dial (SCR_SIDEPICK). Nothing to pick on a single-zone topper,
             // so that device goes straight to its one face. The `cur` half of
@@ -266,7 +270,7 @@ static screen_id_t nav_policy(const app_state_t *st, void **arg)
         {
             screen_id_t cur = ui_router_current();
             if (cur == SCR_MENU || cur == SCR_SETTINGS || cur == SCR_ABOUT ||
-                cur == SCR_WIFI || cur == SCR_TONIGHT || cur == SCR_BRIGHTNESS ||
+                cur == SCR_WIFI || cur == SCR_BRIGHTNESS ||
                 cur == SCR_BRIGHTNESS_MENU || cur == SCR_UPDATE)
                 return cur;
         }
@@ -1326,7 +1330,18 @@ static void handle_immediate_cmd(const app_cmd_t *cmd, const oauth_disc_t *disc,
     case CMD_OTA_CHECK: {
         app_state_t st;
         dial_state_get(&st);
-        if (st.clock_valid) dial_ota_check(st.beta);
+        // One TLS session at a time (see dial_mcp_release_connection): the
+        // OTA client is about to open its own connection to GitHub, and a
+        // second concurrent session fails its handshake on this build.
+        dial_mcp_release_connection();
+        if (st.clock_valid) {
+            // Show "Checking..." for the duration of the call instead of
+            // flicking straight to the answer -- a tap with no visible
+            // response reads as a dead button (owner feedback).
+            dial_ota_mark_checking();
+            commit_ota_snapshot();
+            dial_ota_check(st.beta);
+        }
         else dial_ota_set_blocked("waiting for time sync - try again shortly");
         commit_ota_snapshot();
         break;
@@ -1339,6 +1354,7 @@ static void handle_immediate_cmd(const app_cmd_t *cmd, const oauth_disc_t *disc,
         dial_state_get(&st);
         if (st.ota.status != OTA_AVAILABLE) break;
         s_ota_last_committed_pct = -100;   // guarantee the first progress commit fires
+        dial_mcp_release_connection();   // one TLS session at a time
         bool ok = dial_ota_download_and_apply(ota_progress_cb);
         commit_ota_snapshot();
         if (ok) {
@@ -1757,6 +1773,7 @@ static void worker_task(void *arg)
             bool relief_any = ota_st.zones[ZONE_A].relief_active ||
                                ota_st.zones[ZONE_B].relief_active;
             if (in_window && !relief_any && ota_st.phase == PH_READY) {
+                dial_mcp_release_connection();   // one TLS session at a time
                 dial_ota_check(ota_st.beta);
                 commit_ota_snapshot();
                 last_ota_check_us = esp_timer_get_time();

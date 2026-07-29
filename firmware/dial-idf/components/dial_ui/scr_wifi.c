@@ -294,8 +294,8 @@ static bool on_gesture(lv_dir_t dir)
     // returns true), and LVGL 8.4 then still delivers CLICKED on release to the
     // object the touch started on — so a thumb that drifts up/down/left while
     // pressing Continue would fire the Wi-Fi reset without a deliberate tap.
-    // scr_tonight's picker mode swallows all four directions for exactly this
-    // reason.
+    // Any screen with a modal sub-mode that must own the whole touch until a
+    // deliberate tap or swipe leaves it needs the same blanket swallow.
     if (s_confirm_mode) {
         if (dir == LV_DIR_RIGHT) set_confirm_mode(false);   // right-swipe = cancel
         return true;

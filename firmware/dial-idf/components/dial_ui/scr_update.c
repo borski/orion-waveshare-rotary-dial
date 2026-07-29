@@ -25,6 +25,7 @@
 #include "dial_haptics.h"
 #include "dial_list.h"
 #include "dial_ota.h"
+#include "esp_app_desc.h"
 
 #define CY 180
 #define ROW_H             76
@@ -201,12 +202,10 @@ static void apply_palette(lv_obj_t *scr)
 }
 
 // Renders "Check for updates"' value (+ the FAILED-only error line) from the
-// worker-owned app_state_t.ota mirror -- ported verbatim from scr_about.c's
-// render_ota_row, with one deliberate change: OTA_IDLE now reads "Idle"
-// instead of the running firmware version ("v1.0.1") -- that version still
-// lives on scr_about.c's own Firmware row, and repeating it here (under a
-// row now titled "Check for updates" rather than "Software update") was
-// redundant with no screen left that shows both at once.
+// worker-owned app_state_t.ota mirror -- ported from scr_about.c's
+// render_ota_row. OTA_IDLE reads "Up to date": the running version now has
+// its own "Installed" row directly above (owner request), so this row is
+// free to report the CHECK's outcome instead of repeating the version.
 //
 // Skipped entirely while a confirm tap is armed: confirm_tap() already wrote
 // "Tap again to confirm" into this label, and a routine state commit landing
@@ -255,7 +254,7 @@ static void render_ota_row(const app_state_t *st)
         break;
     case OTA_IDLE:
     default:
-        lv_label_set_text(s_val_ota, "Idle");
+        lv_label_set_text(s_val_ota, "Up to date");
         break;
     }
 }
@@ -273,6 +272,18 @@ static void create(lv_obj_t *scr, void *arg)
     s_list = dial_list_create(scr, ROW_H);
 
     make_row(s_list, LV_SYMBOL_LEFT "  Back", row_back_cb, NULL);
+
+    // What this dial is running right now, above the row that offers to
+    // change it (owner request): deciding whether to install is a comparison,
+    // and About is the wrong place to have to go looking for half of it.
+    // Read-only, so no callback.
+    {
+        lv_obj_t *ver_val;
+        make_row(s_list, "Installed", NULL, &ver_val);
+        char v[24];
+        snprintf(v, sizeof v, "v%s", esp_app_get_description()->version);
+        lv_label_set_text(ver_val, v);
+    }
 
     // Unlike a plain label+value row, this one carries worker-driven prose
     // that can run long ("Tap again to confirm", "v1.2.3 available - tap to

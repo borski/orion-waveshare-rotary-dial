@@ -16,7 +16,7 @@
  * The wheel does not wrap. A ring that wraps has no "you are at the start/
  * end" tell short of counting detents in your head; clamping and voicing
  * HAPTIC_STOP at either edge is the same range-stop vocabulary scr_boost's
- * duration arc and scr_tonight's wake-time picker already use.
+ * duration arc and scr_brightness's percent picker already use.
  *
  * The password is shown in clear text, caret and all. This is the user's own
  * bedroom network, typed on a device sitting in it — hiding the characters

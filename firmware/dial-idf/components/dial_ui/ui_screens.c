@@ -11,13 +11,13 @@ void ui_screens_register_all(void)
     ui_router_register(SCR_OAUTH_QR, &scr_oauth_qr);
     ui_router_register(SCR_DIAL, &scr_dial);
     ui_router_register(SCR_MENU, &scr_menu);
-    ui_router_register(SCR_TONIGHT, &scr_tonight);
     ui_router_register(SCR_STANDBY, &scr_standby);
     ui_router_register(SCR_QUICK, &scr_quick);
     ui_router_register(SCR_BOOST, &scr_boost);
     ui_router_register(SCR_WELCOME, &scr_welcome);
     ui_router_register(SCR_SIDEPICK, &scr_sidepick);
     ui_router_register(SCR_SETTINGS, &scr_settings);
+    ui_router_register(SCR_ADJUST_MODE, &scr_adjust_mode);
     ui_router_register(SCR_BRIGHTNESS_MENU, &scr_brightness_menu);
     ui_router_register(SCR_BRIGHTNESS, &scr_brightness);
     ui_router_register(SCR_WIFI, &scr_wifi);

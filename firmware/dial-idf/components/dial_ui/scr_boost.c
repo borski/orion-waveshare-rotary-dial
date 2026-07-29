@@ -138,7 +138,7 @@ static void create(lv_obj_t *scr, void *arg)
     // Kill the default theme's knob dot at the indicator's leading edge — a
     // knob is a drag handle, and this arc is display-only (duration rides
     // the encoder, per on_knob). Same suppression every other non-draggable
-    // ring applies (scr_menu/scr_standby/scr_tonight/scr_updating).
+    // ring applies (scr_menu/scr_standby/scr_adjust_mode/scr_updating).
     lv_obj_set_style_bg_opa(s_arc, LV_OPA_TRANSP, LV_PART_KNOB);
     lv_obj_clear_flag(s_arc, LV_OBJ_FLAG_CLICKABLE);
 

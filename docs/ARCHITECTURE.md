@@ -123,7 +123,7 @@ change meaning under an unattended OTA). Two invariants govern the dial face:
    from the device value and displays it, but never writes back — so the number
    and the bed always move together, or not at all.
 2. **Setpoints render in the active scale; measurements render in absolute.**
-   The hero numeral and the Tonight schedule are setpoints (levels in relative
+   The hero numeral and the sleep schedule are setpoints (levels in relative
    mode). The measured **water** temperature is a continuum reading and stays a
    real degree (°F/°C) in every mode, keeping an absolute reference on screen.
 

@@ -45,7 +45,6 @@ set(DIAL_UI_SRCS
   ${DIAL_UI_DIR}/scr_netpick.c
   ${DIAL_UI_DIR}/scr_passkey.c
   ${DIAL_UI_DIR}/scr_menu.c
-  ${DIAL_UI_DIR}/scr_tonight.c
   ${DIAL_UI_DIR}/scr_wifi.c
   ${DIAL_UI_DIR}/scr_about.c
   ${DIAL_UI_DIR}/scr_update.c
@@ -56,6 +55,7 @@ set(DIAL_UI_SRCS
   ${DIAL_UI_DIR}/scr_welcome.c
   ${DIAL_UI_DIR}/scr_sidepick.c
   ${DIAL_UI_DIR}/scr_settings.c
+  ${DIAL_UI_DIR}/scr_adjust_mode.c
   ${DIAL_UI_DIR}/scr_brightness_menu.c
   ${DIAL_UI_DIR}/scr_brightness.c
   ${DIAL_UI_DIR}/dial_palette.c

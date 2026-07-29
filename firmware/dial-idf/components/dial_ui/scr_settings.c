@@ -14,6 +14,13 @@
  * submenu (scr_brightness_menu.c), which holds the actual Day/Night rows —
  * collapsed out of this list (M7) so a single value cell here never has to
  * summarize two independent percentages.
+ *
+ * Row order (owner-approved): Back, Adjustment mode, Brightness, Scale,
+ * Units, Haptics, Rotation, Re-link Orion, Factory reset. Settings a user
+ * returns to sit on top — what the knob does to the bed (Adjustment mode)
+ * and brightness on a bedside device are the two people actually revisit.
+ * Install-once display prefs (Scale/Units/Haptics/Rotation) sit below that;
+ * the destructive rows stay last, unchanged.
  */
 #include "ui_screens_internal.h"
 #include "dial_haptics.h"
@@ -26,7 +33,7 @@
 
 static lv_obj_t *s_title_lbl;
 static lv_obj_t *s_list;
-static lv_obj_t *s_val_scale, *s_val_units, *s_val_sched_follow, *s_val_haptics, *s_val_rotation;
+static lv_obj_t *s_val_scale, *s_val_units, *s_val_adjust_mode, *s_val_haptics, *s_val_rotation;
 
 typedef enum { CONFIRM_RELINK = 0, CONFIRM_FACTORY, CONFIRM_COUNT } confirm_id_t;
 static lv_obj_t   *s_val_confirm[CONFIRM_COUNT];
@@ -153,21 +160,18 @@ static void row_units_cb(lv_event_t *e)
     dial_state_set_units_c(!st.units_c);
 }
 
-// "Temp until": names the OUTCOME the user actually cares about — how
-// long the temperature they just dialed survives — rather than the
-// mechanism ("dial adjusts what?"). "Next step" (default) makes a knob turn during
-// tonight's active sleep-schedule phase retarget just that phase, leaving
-// the rest of tonight's schedule in control — matches the Orion app.
-// "Morning" instead holds the new setpoint for the rest of the night, this
-// dial's pre-M8 behavior. See app_state_t.sched_follow and main.c's
-// temp_write_phase()/sleep_phase_now() for the write-path logic this picks.
-static void row_sched_follow_cb(lv_event_t *e)
+// Opens the Adjustment mode screen (scr_adjust_mode.c) — plain navigation,
+// same as Brightness below. A single value cell here can name WHICH mode is
+// active ("Schedule"/"Hold") but can't explain what either one actually
+// does to a knob turn hours from now — that explanation is the whole point
+// of the sub-screen, so this row just points at it (see app_state_t.sched_follow
+// and main.c's temp_write_phase()/sleep_phase_now() for the write-path logic
+// the choice picks).
+static void row_adjust_mode_cb(lv_event_t *e)
 {
     (void)e;
-    app_state_t st;
-    dial_state_get(&st);
     dial_haptics_play(HAPTIC_TICK);
-    dial_state_set_sched_follow(!st.sched_follow);
+    ui_router_go(SCR_ADJUST_MODE, NULL, LV_SCR_LOAD_ANIM_MOVE_LEFT);
 }
 
 // Off -> Low -> High -> Auto -> Off, same cycle-through-a-fixed-set idiom
@@ -263,12 +267,23 @@ static void create(lv_obj_t *scr, void *arg)
     // ui_zone that one swipe on the dial already sets (and persists) — the row
     // changed nothing you couldn't change faster by swiping.
     make_row(s_list, LV_SYMBOL_LEFT "  Back", row_back_cb, NULL);
+
+    // "Adjustment mode" is the longest label in this list — at Mont 24 it
+    // alone eats most of a row's ~288px content width, so a right-aligned
+    // value beside it collides (same class of overlap the confirm rows'
+    // "Tap again to confirm" hits below, just triggered here by the LABEL
+    // instead of the value). Same fix: the value drops to a second,
+    // left-aligned line under the label rather than sharing its line.
+    lv_obj_t *am_row = make_row(s_list, "Adjustment mode", row_adjust_mode_cb, &s_val_adjust_mode);
+    lv_obj_align(lv_obj_get_child(am_row, 0), LV_ALIGN_LEFT_MID, 0, -16);
+    lv_obj_set_width(s_val_adjust_mode, LV_PCT(100));
+    lv_obj_align(s_val_adjust_mode, LV_ALIGN_LEFT_MID, 0, 16);
+
+    make_row(s_list, "Brightness",    row_brightness_cb,    NULL);
     make_row(s_list, "Scale",         row_scale_cb,         &s_val_scale);
     make_row(s_list, "Units",         row_units_cb,         &s_val_units);
-    make_row(s_list, "Temp until",    row_sched_follow_cb,  &s_val_sched_follow);
-    make_row(s_list, "Rotation",      row_rotation_cb,      &s_val_rotation);
     make_row(s_list, "Haptics",       row_haptics_cb,       &s_val_haptics);
-    make_row(s_list, "Brightness",    row_brightness_cb,    NULL);
+    make_row(s_list, "Rotation",      row_rotation_cb,      &s_val_rotation);
     make_row(s_list, "Re-link Orion", row_relink_cb,        &s_val_confirm[CONFIRM_RELINK]);
     make_row(s_list, "Factory reset", row_factory_reset_cb, &s_val_confirm[CONFIRM_FACTORY]);
 
@@ -293,7 +308,7 @@ static void create(lv_obj_t *scr, void *arg)
     lv_obj_align(s_title_lbl, LV_ALIGN_CENTER, 0, 64 - CY);
 
     apply_palette(scr);
-    dial_list_settle(s_list, 1);   // open on "Scale" (index 1), not on Back
+    dial_list_settle(s_list, 1);   // open on "Adjustment mode" (index 1), not on Back
     s_confirm_timer = lv_timer_create(confirm_timer_cb, 250, NULL);
 }
 
@@ -302,7 +317,7 @@ static void destroy(void)
     if (s_confirm_timer) { lv_timer_del(s_confirm_timer); s_confirm_timer = NULL; }
     s_list = NULL;
     s_title_lbl = NULL;
-    s_val_scale = s_val_units = s_val_sched_follow = s_val_haptics = s_val_rotation = NULL;
+    s_val_scale = s_val_units = s_val_adjust_mode = s_val_haptics = s_val_rotation = NULL;
     for (int i = 0; i < CONFIRM_COUNT; i++) s_val_confirm[i] = NULL;
     s_armed = CONFIRM_COUNT;
 }
@@ -322,7 +337,7 @@ static void on_state(const app_state_t *st)
         lv_label_set_text(s_val_units, st->units_c ? "\xC2\xB0" "C (water)" : "\xC2\xB0" "F (water)");
     else
         lv_label_set_text(s_val_units, st->units_c ? "\xC2\xB0" "C" : "\xC2\xB0" "F");
-    lv_label_set_text(s_val_sched_follow, st->sched_follow ? "Next step" : "Morning");
+    lv_label_set_text(s_val_adjust_mode, st->sched_follow ? "Schedule" : "Hold");
     // Indexed directly by the stored value (see app_state_t.haptics_level):
     // 0=Off, 1=Auto, 2=Low, 3=High.
     static const char *HAPTICS_TXT[] = { "Off", "Auto", "Low", "High" };
