@@ -24,8 +24,13 @@ static const char *TAG = "ota";
     "https://api.github.com/repos/chris023/orion-waveshare-rotary-dial/releases/latest"
 // The LIST endpoint (beta channel only) -- unlike /releases/latest, this
 // includes prereleases. Same host/owner/repo, no trailing "/latest".
+// per_page is load-bearing: the unbounded list is ~70KB once a project has a
+// dozen releases (measured 2026-07-29) and blew straight past CHECK_BUF_CAP,
+// failing every beta check with "release JSON too large". GitHub returns
+// newest-first, so the newest few are the only ones that can ever win the
+// is_newer comparison; 5 of them is ~27KB, comfortably inside the cap.
 #define GITHUB_API_URL_LIST \
-    "https://api.github.com/repos/chris023/orion-waveshare-rotary-dial/releases"
+    "https://api.github.com/repos/chris023/orion-waveshare-rotary-dial/releases?per_page=5"
 #define ASSET_NAME     "orion-dial.bin"
 #define TAG_PREFIX     "dial-v"
 #define CHECK_BUF_CAP  (64 * 1024)   // release JSON is normally ~10-30KB
@@ -34,7 +39,7 @@ static const char *TAG = "ota";
 // JSON walk and the worst case where the newest few entries are all drafts
 // or malformed -- this device has no business scanning its whole release
 // history.
-#define RELEASES_LIST_SCAN_CAP 10
+#define RELEASES_LIST_SCAN_CAP 5   // matches per_page above
 
 // Guards s_info and s_asset_url. A short spinlock (never held across a
 // blocking call), matching dial_state.c's s_input_mux idiom for cross-task

@@ -35,10 +35,16 @@ typedef enum {
  */
 typedef enum {
     HAPTIC_LEVEL_OFF  = 0,   // nothing plays
-    HAPTIC_LEVEL_AUTO = 1,   // FIRM during the day, SOFT during the sleep
+    // 1 is LOW, and deliberately so: every device that ever ran the old
+    // on/off firmware has a stored 1 meaning "haptics on", and LOW is the
+    // level this dial should feel like (owner, 2026-07-29: High is too much
+    // and Auto is High for half the day). Numbering it here means those
+    // devices land on the right feel with no migration code, while anyone
+    // who deliberately picks Auto stores 2 and keeps it.
+    HAPTIC_LEVEL_LOW  = 1,   // SOFT always, regardless of time of day
+    HAPTIC_LEVEL_AUTO = 2,   // FIRM during the day, SOFT during the sleep
                              // window — today's pre-M7 "enabled" behavior,
                              // unchanged, and the default
-    HAPTIC_LEVEL_LOW  = 2,   // SOFT always, regardless of time of day
     HAPTIC_LEVEL_HIGH = 3,   // FIRM always, regardless of time of day
 } haptic_level_t;
 

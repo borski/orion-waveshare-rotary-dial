@@ -340,7 +340,7 @@ static void on_state(const app_state_t *st)
     lv_label_set_text(s_val_adjust_mode, st->sched_follow ? "Schedule" : "Hold");
     // Indexed directly by the stored value (see app_state_t.haptics_level):
     // 0=Off, 1=Auto, 2=Low, 3=High.
-    static const char *HAPTICS_TXT[] = { "Off", "Auto", "Low", "High" };
+    static const char *HAPTICS_TXT[] = { "Off", "Low", "Auto", "High" };   // index == haptic_level_t
     lv_label_set_text(s_val_haptics,
         HAPTICS_TXT[st->haptics_level <= HAPTIC_LEVEL_HIGH ? st->haptics_level : HAPTIC_LEVEL_AUTO]);
 }

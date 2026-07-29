@@ -53,7 +53,7 @@ static const fx_pair_t FX[] = {
 static QueueHandle_t  s_q;
 static bool           s_present;
 static volatile bool  s_night;
-static volatile haptic_level_t s_level = HAPTIC_LEVEL_AUTO;   // matches dial_state's own default
+static volatile haptic_level_t s_level = HAPTIC_LEVEL_LOW;   // matches dial_state's own default
 
 static bool wr(uint8_t reg, uint8_t val)
 {

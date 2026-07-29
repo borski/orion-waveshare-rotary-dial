@@ -22,9 +22,9 @@ static inline uint8_t clamp_bri_pct(uint8_t pct)
 // Same defensive style, for the haptics level. Mirrors dial_haptics.h's
 // haptic_level_t (0=Off, 1=Auto, 2=Low, 3=High — see app_state_t.
 // haptics_level's comment). An out-of-range byte (corrupt NVS, or a future
-// firmware's level this build predates) clamps to Auto, not Off: silently
+// firmware's level this build predates) clamps to Low, not Off: silently
 // going quiet is the wrong failure mode for a physical-feedback preference,
-// and Auto is this pref's own default besides.
+// and Low is this pref's own default besides.
 static inline uint8_t clamp_haptics_level(uint8_t level)
 {
     return (level <= 3) ? level : 1;
@@ -49,7 +49,7 @@ void dial_state_init(void)
     memset(&s_state, 0, sizeof(s_state));
     s_state.phase = PH_BOOT;
     s_state.wifi_join_idx = -1;   // no on-device join attempted yet
-    s_state.haptics_level = 1;        // HAPTIC_LEVEL_AUTO — matches dial_haptics.c's own default
+    s_state.haptics_level = 1;        // HAPTIC_LEVEL_LOW — the default feel (see dial_haptics.h)
     s_state.bri_day_pct   = 100;      // fresh-device default == today's exact
     s_state.bri_night_pct = 100;      // brightness (100% of the existing duty tables)
     s_state.beta          = false;    // fresh-device default: stable channel only
@@ -71,7 +71,7 @@ void dial_state_restore_prefs(void)
 {
     nvs_handle_t h;
     if (nvs_open(NVS_NS, NVS_READONLY, &h) != ESP_OK) return;
-    uint8_t zone = 0, units = 0, haptics = 1 /* HAPTIC_LEVEL_AUTO */, rot = 0, relmode = 1;
+    uint8_t zone = 0, units = 0, haptics = 1 /* HAPTIC_LEVEL_LOW */, rot = 0, relmode = 1;
     uint8_t bri_day = 100, bri_night = 100;
     uint8_t beta = 0;
     uint8_t sched_follow = 1;   // matches init's fresh-device default (Follow)
