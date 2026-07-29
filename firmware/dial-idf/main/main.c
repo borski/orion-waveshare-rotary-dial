@@ -339,8 +339,6 @@ static void mut_device_state(app_state_t *st, void *arg)
         st->zones[z].sched_bedtime_temp_c      = keep.sched_bedtime_temp_c;
         strlcpy(st->zones[z].sched_wakeup, keep.sched_wakeup, sizeof(st->zones[z].sched_wakeup));
         st->zones[z].sched_wakeup_temp_c        = keep.sched_wakeup_temp_c;
-        st->zones[z].sched_override_available   = keep.sched_override_available;
-        st->zones[z].sched_override_applied     = keep.sched_override_applied;
         st->zones[z].sched_smart_temp_active    = keep.sched_smart_temp_active;
         st->zones[z].sched_phase1_offset_min    = keep.sched_phase1_offset_min;
         st->zones[z].sched_phase1_temp_c        = keep.sched_phase1_temp_c;
@@ -478,8 +476,6 @@ typedef struct {
     float bedtime_temp_c;
     char  wakeup[6];
     float wakeup_temp_c;
-    bool  override_available;
-    bool  override_applied;
     // Smart-temperature phase fields — see zone_state_t's comment in
     // dial_state.h for what these mean.
     bool  smart_temp_active;
@@ -500,8 +496,6 @@ static void mut_schedules(app_state_t *st, void *arg)
         st->zones[z].sched_bedtime_temp_c      = s->zones[z].bedtime_temp_c;
         strlcpy(st->zones[z].sched_wakeup, s->zones[z].wakeup, sizeof(st->zones[z].sched_wakeup));
         st->zones[z].sched_wakeup_temp_c        = s->zones[z].wakeup_temp_c;
-        st->zones[z].sched_override_available   = s->zones[z].override_available;
-        st->zones[z].sched_override_applied     = s->zones[z].override_applied;
         st->zones[z].sched_smart_temp_active    = s->zones[z].smart_temp_active;
         st->zones[z].sched_phase1_offset_min    = s->zones[z].phase1_offset_min;
         st->zones[z].sched_phase1_temp_c        = s->zones[z].phase1_temp_c;
@@ -1113,7 +1107,10 @@ static bool orion_match_partner(void *arg)
 
 // get_sleep_schedules {} returns {schedules: {"<uuid>": [ {day:0-6, bedtime,
 // bedtime_temp, wakeup, wakeup_temp, is_override_available,
-// is_override_applied, ...} x7 ]}} — one entry per user uuid. Pulls out
+// is_override_applied, ...} x7 ]}} — one entry per user uuid. The override
+// flags are documented here because the response carries them, but nothing
+// reads them since the Tonight face was removed; they are deliberately not
+// parsed. Pulls out
 // TODAY's entry (day == dial_time_now's tm_wday) per zone, matched via
 // s_zone_uuid. Requires a valid clock (to know which weekday "today" is);
 // skips silently if the clock isn't set yet, same as the rest of the app
@@ -1159,8 +1156,6 @@ static bool orion_refresh_schedules(void)
                 if (cJSON_IsNumber(btt)) zs->bedtime_temp_c = (float)btt->valuedouble;
                 if (wk && wk->valuestring) strlcpy(zs->wakeup, wk->valuestring, sizeof(zs->wakeup));
                 if (cJSON_IsNumber(wkt)) zs->wakeup_temp_c = (float)wkt->valuedouble;
-                zs->override_available = cJSON_IsTrue(cJSON_GetObjectItem(entry, "is_override_available"));
-                zs->override_applied   = cJSON_IsTrue(cJSON_GetObjectItem(entry, "is_override_applied"));
 
                 // "Dial adjusts" (M8) phase fields — see sleep_phase_now()'s
                 // comment above for what these mean.
@@ -1180,49 +1175,6 @@ static bool orion_refresh_schedules(void)
     cJSON_Delete(root);
     dial_state_commit(mut_schedules, &sc);
     return true;
-}
-
-// override_sleep_schedule_tonight {fields:{...}} — same field vocabulary as
-// get_sleep_schedules, ack only. Only sends the fields the caller actually
-// changed (a/b == -1 means "leave alone"). Targets the OAuth token's own
-// account implicitly (no user_id in the confirmed schema) — callers must
-// only invoke this for ZONE_A (see the CMD_TONIGHT_OVERRIDE comment in
-// dial_state.h for why).
-typedef struct { int wakeup_min; int bedtime_temp_f; } tonight_override_args_t;
-static bool orion_tonight_override(void *arg)
-{
-    tonight_override_args_t *a = arg;
-    char fields[80] = "";
-    if (a->wakeup_min >= 0) {
-        char buf[24];
-        snprintf(buf, sizeof(buf), "\"wakeup\":\"%02d:%02d\"", a->wakeup_min / 60, a->wakeup_min % 60);
-        strlcat(fields, buf, sizeof(fields));
-    }
-    if (a->bedtime_temp_f >= 0) {
-        if (fields[0]) strlcat(fields, ",", sizeof(fields));
-        char buf[32];
-        snprintf(buf, sizeof(buf), "\"bedtime_temp\":%.1f", dial_f_to_c(a->bedtime_temp_f));
-        strlcat(fields, buf, sizeof(fields));
-    }
-    if (!fields[0]) return true;   // nothing to change
-
-    char args[128];
-    snprintf(args, sizeof(args), "{\"fields\":{%s}}", fields);
-    char *r = NULL;
-    bool ok = dial_mcp_call_tool("override_sleep_schedule_tonight", args, &r);
-    if (!ok) ESP_LOGW(TAG, "override_sleep_schedule_tonight failed: %s", dial_mcp_last_error());
-    free(r);
-    return ok;
-}
-
-static bool orion_tonight_revert(void *arg)
-{
-    (void)arg;
-    char *r = NULL;
-    bool ok = dial_mcp_call_tool("revert_sleep_schedule_override", "{}", &r);
-    if (!ok) ESP_LOGW(TAG, "revert_sleep_schedule_override failed: %s", dial_mcp_last_error());
-    free(r);
-    return ok;
 }
 
 /* ---- worker supervisor ------------------------------------------------- */
@@ -1334,27 +1286,6 @@ static void handle_immediate_cmd(const app_cmd_t *cmd, const oauth_disc_t *disc,
         match_args_t m = { other, st.zones[mine].temp_c, st.zones[mine].on };
         if (with_auth_retry(orion_match_partner, &m, disc, client_id))
             dial_state_commit(mut_match_partner, &m);
-        break;
-    }
-    // Tonight schedule (M5) — the owner's own side only, see dial_state.h's
-    // comment beside CMD_TONIGHT_OVERRIDE for why the partner side is dropped
-    // here. That side is ZONE_A on a normal topper, but a single-zone model may
-    // only have ZONE_B, so compare against the device's primary zone.
-    case CMD_TONIGHT_OVERRIDE: {
-        app_state_t st;
-        dial_state_get(&st);
-        if (cmd->zone != dial_state_primary_zone(&st)) break;
-        tonight_override_args_t a = { cmd->a, cmd->b };
-        if (with_auth_retry(orion_tonight_override, &a, disc, client_id))
-            with_auth_retry(sched_call, NULL, disc, client_id);   // refresh so override_applied flips immediately
-        break;
-    }
-    case CMD_TONIGHT_REVERT: {
-        app_state_t st;
-        dial_state_get(&st);
-        if (cmd->zone != dial_state_primary_zone(&st)) break;
-        if (with_auth_retry(orion_tonight_revert, NULL, disc, client_id))
-            with_auth_retry(sched_call, NULL, disc, client_id);
         break;
     }
     // Settings (M4) destructive actions: each erases some NVS state and
@@ -1712,11 +1643,10 @@ static void worker_task(void *arg)
                     // device now holds this target regardless of which write
                     // path got it there), so the UI reflects the new setpoint
                     // immediately exactly like it did pre-M8. On a successful
-                    // override, also refresh schedules right away (same
-                    // pattern CMD_TONIGHT_OVERRIDE already uses below) so the
-                    // overridden phase's own temp field and override_applied
-                    // are correct on the very next read, not just after the
-                    // next ~30min periodic refresh.
+                    // override, also refresh schedules right away so the
+                    // overridden phase's own temp field is correct on the
+                    // very next read, not just after the next ~30min
+                    // periodic refresh.
                     set_temp_args_t sa = { (zone_idx_t)z, up.temp_c, false };
                     if (with_auth_retry(orion_set_temp, &sa, &disc, client_id)) {
                         dial_state_commit(mut_zone_temp, &up);
@@ -1749,8 +1679,10 @@ static void worker_task(void *arg)
 
         // Night mode: warm-dim + quiet haptics while the household sleeps.
         // Real window (M5): bedtime-30min -> wake+30min from ZONE_A's
-        // schedule (the dial's own side — see CMD_TONIGHT_OVERRIDE's comment
-        // for why only ZONE_A's schedule is trusted); falls back to a fixed
+        // schedule (the dial's own side: override_sleep_schedule_tonight has
+        // no user_id in its confirmed schema, so it implicitly targets the
+        // token owner's account and only that side's schedule can be trusted
+        // to describe this dial); falls back to a fixed
         // 21:00-07:00 window until that schedule is known.
         struct tm lt;
         if (dial_time_now(&lt)) {

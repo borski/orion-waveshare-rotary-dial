@@ -153,8 +153,6 @@ typedef struct {
     float sched_bedtime_temp_c;
     char  sched_wakeup[6];         // "HH:MM", 24h
     float sched_wakeup_temp_c;
-    bool  sched_override_applied;
-    bool  sched_override_available;
 
     // Smart-temperature phase schedule ("Dial adjusts" / M8), same
     // get_sleep_schedules entry as the fields above. is_smart_temperature_active
@@ -534,19 +532,6 @@ typedef enum {
     CMD_AWAY,          // a=1 away / 0 home
     CMD_MATCH_PARTNER, // zone = mine; worker reads the store at execution
                        // time and set_zones the OTHER zone to my (temp_c, on)
-
-    // Tonight schedule (M5). ONLY ZONE_A is supported: override_sleep_
-    // schedule_tonight's confirmed field vocabulary has no user_id — it
-    // implicitly targets the OAuth token's own account, and with two users
-    // sharing a bed we have no reliable way to tell which of the two uuids
-    // get_sleep_schedules returns is the token owner. Simplest safe answer:
-    // only the dial's own side (ZONE_A, per D3) offers the override control.
-    // Both commands are dropped by the worker if cmd->zone != ZONE_A.
-    CMD_TONIGHT_OVERRIDE, // zone (must be ZONE_A); a = new wakeup minutes-
-                          // from-midnight (0-1439) or -1 to keep; b = new
-                          // bedtime_temp_f or -1 to keep (unused by today's
-                          // wake-only picker; reserved for a future control)
-    CMD_TONIGHT_REVERT,   // zone (must be ZONE_A) — reverts today's override
 
     // Settings (M4) destructive actions — each erases some NVS state and
     // reboots. Handled in main.c's handle_immediate_cmd like the others
