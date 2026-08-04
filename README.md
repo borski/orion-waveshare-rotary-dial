@@ -180,6 +180,11 @@ Then run `./build/dial_sim` from the repo root; PNGs land in
 `docs/screens/`. See
 [simulator/README.md](simulator/README.md) for details.
 
+## What's new
+
+[CHANGELOG.md](CHANGELOG.md) covers every release; the same notes appear on
+each [GitHub Release](https://github.com/chris023/orion-waveshare-rotary-dial/releases).
+
 ## Repo layout
 
 - [`firmware/dial-idf/`](firmware/dial-idf/) — the product: the ESP-IDF (C)

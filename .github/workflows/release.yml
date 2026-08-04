@@ -20,7 +20,12 @@ jobs:
   build-and-release:
     runs-on: ubuntu-latest
     steps:
+      # fetch-depth: 0 — the release-notes step needs the tag history to
+      # resolve the PREVIOUS tag for the compare link. The default shallow
+      # clone has no tags at all.
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Verify tag matches PROJECT_VER
         run: |
@@ -35,6 +40,44 @@ jobs:
             exit 1
           fi
           echo "Tag version $TAG_VERSION matches PROJECT_VER $PROJECT_VER"
+
+      # The release body comes from CHANGELOG.md's section for this version.
+      # Checked HERE, before the ~3min build, so a forgotten entry fails in
+      # seconds rather than after a full compile — and checked at all because
+      # the first 20 releases shipped with empty bodies precisely because
+      # nothing ever asked for one.
+      - name: Extract release notes from CHANGELOG.md
+        id: notes
+        run: |
+          VER="${GITHUB_REF_NAME#dial-v}"
+          # Section runs from "## <version>" (exact — 1.2.0 must not match
+          # 1.2.0-beta.1) to the next "## " heading.
+          BODY="$(awk -v ver="$VER" '
+            $0 == "## " ver || index($0, "## " ver " ") == 1 { inside = 1; next }
+            inside && /^## / { exit }
+            inside { print }
+          ' CHANGELOG.md)"
+          # Trim leading/trailing blank lines.
+          BODY="$(printf '%s\n' "$BODY" | sed -e '/./,$!d' | sed -e :a -e '/^\n*$/{$d;N;};/\n$/ba')"
+          if [ -z "$BODY" ]; then
+            echo "::error::No '## $VER' section in CHANGELOG.md. Add one describing what changed, then re-tag."
+            exit 1
+          fi
+          PREV_TAG="$(git describe --tags --abbrev=0 "${GITHUB_REF_NAME}^" 2>/dev/null || true)"
+          {
+            echo 'body<<RELEASE_NOTES_EOF'
+            printf '%s\n' "$BODY"
+            echo
+            if [ -n "$PREV_TAG" ]; then
+              echo "**Full changelog**: [\`$PREV_TAG...$GITHUB_REF_NAME\`](https://github.com/${GITHUB_REPOSITORY}/compare/${PREV_TAG}...${GITHUB_REF_NAME})"
+              echo
+            fi
+            echo "Dials already running the firmware pick this up on their own — see Menu → Update."
+            echo "For a first install, use the [browser flasher](https://chris023.github.io/orion-waveshare-rotary-dial/); \`orion-dial-merged.bin\` below is the same image for flashing manually from offset 0x0."
+            echo 'RELEASE_NOTES_EOF'
+          } >> "$GITHUB_OUTPUT"
+          echo "Release notes for $VER:"
+          printf '%s\n' "$BODY"
 
       # Beta channel: a tag like dial-v1.1.0-beta.1 publishes as a GitHub
       # PRERELEASE. That single flag is what keeps the two channels apart —
@@ -74,6 +117,7 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           prerelease: ${{ steps.channel.outputs.prerelease }}
+          body: ${{ steps.notes.outputs.body }}
           files: |
             firmware/dial-idf/build/orion-dial.bin
             firmware/dial-idf/build/orion-dial-merged.bin
