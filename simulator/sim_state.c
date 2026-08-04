@@ -8,7 +8,8 @@
  * set_ui_temp, set_zone_on, set_ui_zone, set_welcomed, set_side_picked,
  * set_units_c, set_rel_mode, set_haptics_level, set_rotation, set_wifi_join,
  * clear_wifi_join_failed, set_phase, stamp_input, get/set_bri_day_pct,
- * get/set_bri_night_pct, get/set_bri_night_clock_pct, set_beta,
+ * get/set_bri_night_pct, get/set_bri_night_clock_pct,
+ * get/set_screen_timeout_s, set_beta,
  * set_sched_follow, set_ota_auto,
  * set_ota_defer, set_ota_skip, clear_ota_prompt_due, and dial_cmd_post (a
  * logging no-op — there is no worker task here to drain the queue).
@@ -32,15 +33,30 @@ void sim_state_reset(void)
     memset(&s_state, 0, sizeof(s_state));
     s_state.ui_temp_f[ZONE_A] = -1;
     s_state.ui_temp_f[ZONE_B] = -1;
+    // Matches dial_state_init()'s real-firmware default: -1 = "Holding" on
+    // scr_dial.c's status pill (§3). There is no worker task here to derive
+    // this from a schedule (compute_hold_until_min lives in main.c, which
+    // the simulator never links) — scenarios that want "Until H:MM" poke it
+    // directly, same as every other worker-computed field this file seeds
+    // by hand (see this file's own header comment).
+    s_state.zones[ZONE_A].hold_until_min = -1;
+    s_state.zones[ZONE_B].hold_until_min = -1;
+    // Matches dial_state_init(): -1 = "not yet discovered", so
+    // dial_state_temp_min_f()/_max_f() fall back to DIAL_TEMP_MIN_F/MAX_F
+    // (now the real 50-113F rails themselves) — 0 would be misread as a
+    // discovered-but-degenerate range, not "unknown", so this can't be left
+    // to the memset above.
+    s_state.temp_min_f = -1;
+    s_state.temp_max_f = -1;
     s_state.wifi_join_idx = -1;
-    s_state.bri_day_pct = 100;    // matches dial_state_init's fresh-device default,
-    s_state.bri_night_pct = 100;  // so screenshots render scr_settings' new rows as "100%"
-    s_state.bri_night_clock_pct = s_state.bri_night_pct;  // mirrors dial_state_init's
-                                   // own fresh-device seed (both 100) — a fresh
-                                   // sim state has nothing to migrate, so this is
-                                   // just "same as night" rather than a bare 100
-                                   // literal, matching the real firmware's intent
-    s_state.haptics_level = 1;    // HAPTIC_LEVEL_AUTO — matches dial_state_init's default
+    // Fresh-device defaults, matching dial_state_init exactly so screenshots
+    // show what a new dial actually ships with.
+    s_state.bri_day_pct = 30;
+    s_state.bri_night_pct = 0;
+    s_state.bri_night_clock_pct = 20;   // its own default, not derived from night
+    s_state.screen_timeout_s = 90;  // matches dial_state_init's default; the row
+                                   // renders it as "1m", the nearest offered choice
+    s_state.haptics_level = 1;    // HAPTIC_LEVEL_LOW — matches dial_state_init's default
     s_state.sched_follow = true;  // "Dial adjusts" default — matches dial_state_init's default
     s_state.ota_auto = 0;         // Off — matches dial_state_init's fresh-device default
     // ota_defer/ota_shown/ota_skip/ota_prompt_due all default to 0/""/false
@@ -92,6 +108,23 @@ void dial_state_set_rel_mode(bool rel_mode)
     s_state.generation++;
 }
 
+// Optimistic relief write: the simulator has no worker to reconcile against,
+// so this just mutates the store the same way the firmware's does.
+void dial_state_set_relief_optimistic(int zone, bool active, bool heat, int64_t end_ms)
+{
+    for (int z = 0; z < ZONE_COUNT; z++) {
+        if (zone >= 0 && z != zone) continue;
+        if (!active && s_state.zones[z].relief_active) {
+            s_state.zones[z].on     = s_state.zones[z].relief_prev_on;
+            s_state.zones[z].temp_c = s_state.zones[z].relief_prev_temp_c;
+        }
+        s_state.zones[z].relief_active = active;
+        s_state.zones[z].relief_heat   = heat;
+        s_state.zones[z].relief_end_ms = active ? end_ms : 0;
+    }
+    s_state.generation++;
+}
+
 void dial_state_set_haptics_level(uint8_t level)
 {
     s_state.haptics_level = level;
@@ -124,6 +157,14 @@ uint8_t dial_state_get_bri_night_clock_pct(void) { return s_state.bri_night_cloc
 void dial_state_set_bri_night_clock_pct(uint8_t pct)
 {
     s_state.bri_night_clock_pct = pct;
+    s_state.generation++;
+}
+
+uint16_t dial_state_get_screen_timeout_s(void) { return s_state.screen_timeout_s; }
+
+void dial_state_set_screen_timeout_s(uint16_t seconds)
+{
+    s_state.screen_timeout_s = seconds;
     s_state.generation++;
 }
 
@@ -200,11 +241,14 @@ void dial_state_stamp_input(void)
 
 void dial_cmd_post(const app_cmd_t *cmd)
 {
+    // Kept aligned by hand with dial_state.h's cmd_kind_t ordinals — this is
+    // a debug label only (dial_cmd_post has no worker to actually drain into
+    // here), but a stale table silently prints the wrong name forever, which
+    // is how this one drifted after CMD_MATCH_PARTNER's removal (§4).
     static const char *KIND[] = {
         "SET_TEMP", "TOGGLE_ON", "BOOST_START", "BOOST_CANCEL", "BED_OFF",
-        "AWAY", "MATCH_PARTNER", "TONIGHT_OVERRIDE", "TONIGHT_REVERT",
-        "RELINK", "WIFI_RESET", "FACTORY_RESET", "OTA_CHECK", "OTA_APPLY",
-        "OTA_CLEAR_FAILED",
+        "AWAY", "RELINK", "WIFI_RESET", "FACTORY_RESET", "OTA_CHECK",
+        "OTA_APPLY", "OTA_CLEAR_FAILED",
     };
     const char *k = (cmd->kind >= 0 && (size_t)cmd->kind < sizeof(KIND) / sizeof(KIND[0]))
                         ? KIND[cmd->kind] : "?";

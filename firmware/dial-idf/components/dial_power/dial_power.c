@@ -1,5 +1,7 @@
 #include "dial_power.h"
 
+#include <stdint.h>
+
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "esp_timer.h"
@@ -15,9 +17,45 @@ static const char *TAG = "power";
 #define BL_MODE    LEDC_LOW_SPEED_MODE
 #define BL_CHANNEL LEDC_CHANNEL_1
 
-#define DIM_AFTER_US      (30LL * 1000000)   // 30s idle -> dimmed
-#define STANDBY_AFTER_US  (90LL * 1000000)   // 90s idle -> standby
 #define FADE_MS           400
+
+/*
+ * STANDBY fires after dial_state's user-configurable "Screen timeout" pref
+ * (dial_state_get_screen_timeout_s(), NVS "ui"/"scr_to" — Settings' "Screen
+ * timeout" row offers 30s/1m/2m/5m/10m; see dial_state.h's
+ * DIAL_SCR_TIMEOUT_CHOICES). DIM fires at roughly a THIRD of that timeout —
+ * short enough that even the 30s minimum still gets a distinct "about to
+ * lock" warning before STANDBY, clamped to [10s, 30s] so it can never run
+ * past the old fixed 30s (the shortest offered timeout would otherwise dim
+ * immediately, i.e. zero warning) and never drops below ~10s (still a
+ * perceptible heads-up at the floor). Both are read LIVE, once per
+ * power_task tick, exactly like the day/night brightness percents below —
+ * `want`'s idle comparison runs unconditionally every 100ms regardless of
+ * s_force_reapply, so a pref change reaches the standby/dim DECISION within
+ * one tick with no separate "changed" hook needed. (Brightness needs
+ * dial_power_brightness_changed() because its percent only feeds the duty
+ * computed INSIDE the "level changed" branch below; the timeout pref feeds
+ * `want` itself, which is recomputed every tick no matter what.)
+ */
+static inline int64_t standby_after_us(void)
+{
+    return (int64_t)dial_state_get_screen_timeout_s() * 1000000;
+}
+static inline int64_t dim_after_us(void)
+{
+    uint16_t t = dial_state_get_screen_timeout_s();
+    // The dim tier is a heads-up before the clock face takes over, so it only
+    // makes sense when there is room for one. At 5s and 15s there isn't --
+    // a third of 5s is under a second, and the old 10s floor would have
+    // exceeded the timeout itself and dimmed AFTER standby. Below 30s the
+    // tier is skipped entirely (dim == standby, so ACTIVE goes straight to
+    // STANDBY); above it, a third of the timeout capped at the historical 30s.
+    if (t < 30) return (int64_t)t * 1000000;
+    int d = t / 3;
+    if (d < 10) d = 10;
+    if (d > 30) d = 30;
+    return (int64_t)d * 1000000;
+}
 
 // Duty targets (8-bit). Night values keep the room dark. These are the BASE
 // tables at the user's brightness pref == 100%; the apply path below scales
@@ -104,7 +142,9 @@ static portMUX_TYPE s_lvl_spin = portMUX_INITIALIZER_UNLOCKED;
 static dial_power_level_t s_level = DPWR_ACTIVE;
 
 static volatile bool s_night;
-static volatile bool s_force_reapply;   // set_night flips tables mid-level
+static volatile bool s_force_reapply;
+#define INHIBIT_MAX_US (5LL * 60 * 1000000)   // see power_task
+static volatile uint32_t s_inhibit_mask;   // see dial_power_inhibit   // set_night flips tables mid-level
 
 // Settings-screen live preview override: -1 = none, else the exact duty to
 // fade to instead of the normal level duty. Set only from dial_power_preview
@@ -135,9 +175,25 @@ static void power_task(void *arg)
     dial_power_level_t applied = (dial_power_level_t)-1;
     for (;;) {
         int64_t idle = esp_timer_get_time() - dial_state_last_input_us();
+
+        // An inhibit EXTENDS the timeout, it does not disable it. Treating it
+        // as "never sleep" deadlocks: SCR_UPDATE_PROMPT inhibits sleep, and
+        // its own exit condition is "the display returned to standby" — so an
+        // unanswered prompt would hold the screen lit forever. The same trap
+        // applies to any abandoned task screen: a dial left on the pairing QR
+        // (which re-arms a fresh code every 5 minutes) or mid-passkey would
+        // glow all night. Five minutes is far longer than any real pause in
+        // these flows and still guarantees the screen eventually sleeps.
+        int64_t sb_us  = standby_after_us();
+        int64_t dim_us = dim_after_us();
+        if (s_inhibit_mask) {
+            if (sb_us < INHIBIT_MAX_US) sb_us = INHIBIT_MAX_US;
+            dim_us = sb_us;   // no dim tier mid-task: dimming under someone's
+                              // hands reads as the screen dying, not resting
+        }
         dial_power_level_t want =
-            (idle >= STANDBY_AFTER_US) ? DPWR_STANDBY :
-            (idle >= DIM_AFTER_US)     ? DPWR_DIMMED  : DPWR_ACTIVE;
+            (idle >= sb_us) ? DPWR_STANDBY :
+            (idle >= dim_us) ? DPWR_DIMMED  : DPWR_ACTIVE;
 
         taskENTER_CRITICAL(&s_lvl_spin);
         s_level = want;
@@ -206,6 +262,32 @@ bool dial_power_wake_consumes(void)
     }
     taskEXIT_CRITICAL(&s_lvl_spin);
     return consumed;
+}
+
+void dial_power_inhibit(dial_power_inhibit_src_t src, bool on)
+{
+    // Read-modify-write from TWO tasks (the LVGL task sets SCREEN on every
+    // navigation, the worker sets TASK around multi-second calls), so it
+    // takes the same spinlock the rest of this file's cross-task state uses.
+    // Unguarded, an interleave drops one source's bit — and losing SCREEN is
+    // precisely the passkey-screen-sleeps-mid-entry bug this feature exists
+    // to prevent.
+    taskENTER_CRITICAL(&s_lvl_spin);
+    uint32_t before = s_inhibit_mask;
+    if (on) s_inhibit_mask |= (uint32_t)src;
+    else    s_inhibit_mask &= ~(uint32_t)src;
+    uint32_t after = s_inhibit_mask;
+    taskEXIT_CRITICAL(&s_lvl_spin);
+    if (after == before) return;
+
+    // Releasing the LAST hold restarts the idle clock. Without this the clock
+    // resumes from the user's last real touch, which by then is older than the
+    // whole timeout — so a 5s screen slept the instant a request resolved,
+    // before the result could be read (owner, 2026-08-04). A task ending is
+    // exactly when someone starts looking, so they get a full timeout from
+    // that moment.
+    if (before && !after) dial_state_stamp_input();
+    s_force_reapply = true;   // power_task re-decides on its next 100ms tick
 }
 
 void dial_power_set_night(bool night)

@@ -37,6 +37,7 @@ dial_power_level_t dial_power_level(void) { return DPWR_ACTIVE; }
 bool dial_power_wake_consumes(void) { return false; }
 void dial_power_start(void) {}
 void dial_power_set_night(bool night) { (void)night; }
+void dial_power_inhibit(dial_power_inhibit_src_t src, bool on) { (void)src; (void)on; }
 void dial_power_brightness_changed(void) {}
 void dial_power_preview(bool night, dial_power_level_t level, uint8_t pct) { (void)night; (void)level; (void)pct; }
 void dial_power_preview_end(void) {}
@@ -115,6 +116,6 @@ void dial_net_on_event(dial_net_event_cb_t cb) { (void)cb; }
 
 const esp_app_desc_t *esp_app_get_description(void)
 {
-    static const esp_app_desc_t desc = { .version = "1.3.0", .idf_ver = "v6.0" };
+    static const esp_app_desc_t desc = { .version = "1.4.0", .idf_ver = "v6.0" };
     return &desc;
 }

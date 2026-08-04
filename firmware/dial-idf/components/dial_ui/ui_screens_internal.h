@@ -15,7 +15,6 @@ extern const ui_screen_t scr_oauth_qr;
 extern const ui_screen_t scr_dial;
 extern const ui_screen_t scr_menu;
 extern const ui_screen_t scr_standby;
-extern const ui_screen_t scr_quick;
 extern const ui_screen_t scr_boost;
 extern const ui_screen_t scr_welcome;
 extern const ui_screen_t scr_sidepick;

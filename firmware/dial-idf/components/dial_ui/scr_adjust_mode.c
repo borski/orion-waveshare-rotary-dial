@@ -1,11 +1,19 @@
 /*
- * SCR_ADJUST_MODE — "Schedule vs. Hold" choice screen, reached from
- * scr_settings.c's "Adjustment mode" row; swipe right (or the Back pill)
- * returns there. Replaces the old single settings row that cycled the same
- * pref on tap ("Next step" / "Morning"): a preference whose consequence
- * lands hours later, mid-sleep, can't be explained by a value label alone,
- * so this is a full CHOICE screen with prose under the two options instead
- * of a plain toggle.
+ * SCR_ADJUST_MODE — "Schedule vs. Hold" choice screen. Replaces the old
+ * single settings row that cycled the same pref on tap ("Next step" /
+ * "Morning"): a preference whose consequence lands hours later, mid-sleep,
+ * can't be explained by a value label alone, so this is a full CHOICE
+ * screen with prose under the two options instead of a plain toggle.
+ *
+ * Three entry points, one packed `arg` (a uintptr_t, scr_brightness.c's own
+ * packed-arg idiom): 0 = scr_settings.c's "Adjustment mode" row; 1 + zone
+ * (so 1 or 2) = scr_dial.c's power-disc long-press or status-pill tap, for
+ * that zone's dial face. s_origin below stores it as-is (not unpacked into
+ * a bool + zone) so go_back() has one value to switch on. Back (the pill)
+ * and swipe-right both funnel through go_back(), which returns to
+ * SCR_SETTINGS for arg 0 or SCR_DIAL (that zone) for arg 1+zone — owner
+ * feedback on the first cut: hardcoding SCR_SETTINGS sent a dial-face visit
+ * to the wrong place entirely.
  *
  * Hand-laid, not dial_list (owner's call is explicit either way is fine):
  * with only two options this isn't a scrollable list, and the description
@@ -44,6 +52,12 @@ static lv_obj_t *s_pill_schedule, *s_pill_schedule_lbl;
 static lv_obj_t *s_pill_hold, *s_pill_hold_lbl;
 static lv_obj_t *s_desc_lbl;
 static lv_obj_t *s_back, *s_back_lbl;
+
+// Packed entry-point arg, verbatim (see the header comment for the
+// encoding) — 0 = Settings, 1+zone = the dial face for that zone. Stored
+// as-is, not unpacked into separate fields, since every reader (go_back())
+// just switches on the raw value once.
+static uintptr_t s_origin;
 
 /* ---- motion helper (scr_brightness.c's range-stop nudge, ported
  * verbatim) --------------------------------------------------------------*/
@@ -85,11 +99,31 @@ static void select_mode(bool schedule)
 static void schedule_tap_cb(lv_event_t *e) { (void)e; select_mode(true); }
 static void hold_tap_cb(lv_event_t *e)     { (void)e; select_mode(false); }
 
+// The one place that decodes s_origin (see the header comment) — both Back
+// and swipe-right funnel through this instead of each hardcoding a
+// destination, so the two exit paths can never disagree about where "back"
+// means. arg 0 -> Settings, arrived at by a lateral menu swipe, so leaves
+// the same way (MOVE_RIGHT); arg 1+zone -> the dial face for that zone,
+// arrived at by a modal-style long-press/tap (LV_SCR_LOAD_ANIM_NONE both
+// ways, matching scr_dial.c's own power_long_press_cb/pill_event_cb).
+// Deliberately no haptic here — callers add their own (or don't), same
+// split the destination itself used to have (a tapped Back pill confirms,
+// a swipe doesn't, matching every other swipe-back in this UI).
+static void go_back(void)
+{
+    if (s_origin == 0) {
+        ui_router_go(SCR_SETTINGS, NULL, LV_SCR_LOAD_ANIM_MOVE_RIGHT);
+    } else {
+        zone_idx_t zone = (zone_idx_t)(s_origin - 1);
+        ui_router_go(SCR_DIAL, (void *)(uintptr_t)zone, LV_SCR_LOAD_ANIM_NONE);
+    }
+}
+
 static void back_event_cb(lv_event_t *e)
 {
     (void)e;
     dial_haptics_play(HAPTIC_TICK);
-    ui_router_go(SCR_SETTINGS, NULL, LV_SCR_LOAD_ANIM_MOVE_RIGHT);
+    go_back();
 }
 
 /* ---- palette + render ------------------------------------------------------*/
@@ -161,7 +195,7 @@ static lv_obj_t *make_pill(lv_obj_t *scr, const char *txt, lv_coord_t x, lv_even
 
 static void create(lv_obj_t *scr, void *arg)
 {
-    (void)arg;
+    s_origin = (uintptr_t)arg;   // 0 = Settings, 1+zone = the dial face (see header comment)
     const dial_palette_t *pal = PAL();
     lv_obj_set_style_bg_color(scr, pal->bg, 0);
 
@@ -262,7 +296,7 @@ static bool on_knob(int detents)
 static bool on_gesture(lv_dir_t dir)
 {
     if (dir != LV_DIR_RIGHT) return false;
-    ui_router_go(SCR_SETTINGS, NULL, LV_SCR_LOAD_ANIM_MOVE_RIGHT);
+    go_back();
     return true;
 }
 

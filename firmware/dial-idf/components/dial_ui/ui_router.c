@@ -46,9 +46,9 @@ void ui_router_knob_input(int detents)
 screen_id_t ui_router_current(void) { return s_current; }
 
 // Swipe gestures arrive on the screen object; forward to the active screen.
-// All four directions are forwarded (SCR_QUICK/SCR_BOOST dismiss on a down
-// swipe) — screens that only care about left/right (scr_dial) filter the rest
-// out themselves and return false.
+// All four directions are forwarded (SCR_BOOST/SCR_UPDATE_PROMPT dismiss on a
+// down swipe) — screens that only care about left/right (scr_dial) filter the
+// rest out themselves and return false.
 static void gesture_cb(lv_event_t *e)
 {
     (void)e;
@@ -68,6 +68,33 @@ static void gesture_cb(lv_event_t *e)
         // the side of scr_dial's arc can read as a vertical gesture, and
         // eating that touch would drop the drag's LV_EVENT_RELEASED commit.
         lv_indev_wait_release(lv_indev_get_act());
+    }
+}
+
+// Screens that must not let the display sleep underneath the user. Every one
+// of these is a task with natural thinking pauses and no input: typing a
+// password one detent per letter, holding a QR code up to a phone, watching
+// an install run, choosing a boost duration, or reading the update sheet's
+// three options. The rest of the UI — the dial face, the menu and its
+// settings sub-screens — is deliberately NOT here: someone can wander off
+// mid-menu and the standby clock taking over is exactly right.
+static bool screen_blocks_sleep(screen_id_t id)
+{
+    switch (id) {
+    case SCR_WELCOME:        // onboarding, waiting on a first tap
+    case SCR_WIFI_PORTAL:    // "join this AP" instructions
+    case SCR_NETPICK:        // picking a network with the knob
+    case SCR_PASSKEY:        // one letter per detent — the worst case by far
+    case SCR_OAUTH_QR:       // being scanned by a phone
+    case SCR_SIDEPICK:       // first-run side choice
+    case SCR_UPDATING:       // install in progress; screen is the progress bar
+    case SCR_UPDATE_PROMPT:  // an offer the user is reading
+    case SCR_BOOST:          // choosing a duration
+    case SCR_BRIGHTNESS:     // live backlight preview — sleeping mid-adjust
+                             // would both hide and change what is being set
+        return true;
+    default:
+        return false;
     }
 }
 
@@ -108,6 +135,7 @@ void ui_router_go(screen_id_t id, void *arg, lv_scr_load_anim_t anim)
     lv_obj_add_event_cb(scr, gesture_cb, LV_EVENT_GESTURE, NULL);
     s_current = id;
     s_current_arg = arg;
+    dial_power_inhibit(DPWR_INHIBIT_SCREEN, screen_blocks_sleep(id));
     s_screens[id]->create(scr, arg);
 
     // auto_del frees the previous screen (and its widgets) after the animation.

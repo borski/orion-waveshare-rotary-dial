@@ -162,7 +162,9 @@ static lv_obj_t *make_update_row(lv_obj_t *parent, const app_state_t *st)
     lv_obj_set_style_radius(s_dot_update, LV_RADIUS_CIRCLE, 0);
     lv_obj_set_style_border_width(s_dot_update, 0, 0);
     lv_obj_clear_flag(s_dot_update, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
-    lv_obj_align_to(s_dot_update, lbl, LV_ALIGN_OUT_RIGHT_MID, 8, 0);
+    // LEFT of the label (owner): the dot is a notification, and a reader
+    // scanning the list meets it before the word rather than after.
+    lv_obj_align_to(s_dot_update, lbl, LV_ALIGN_OUT_LEFT_MID, -8, 0);
     set_update_row_dot(s_dot_update, st);
 
     return row;

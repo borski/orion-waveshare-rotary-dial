@@ -21,18 +21,42 @@ choice once, rather than to nag repeatedly.
 
 ## Shape
 
-Three parts:
+Four parts:
 
-1. A dismissible **update prompt** shown at most once a day, never at night.
-2. An **auto-update** setting (Off / Overnight) that, once on, makes the prompt
+1. An **ambient indicator** on the dial and standby faces — always-on,
+   unconditional discoverability.
+2. A dismissible **update prompt** shown at most once a day, never at night.
+3. An **auto-update** setting (Off / Overnight) that, once on, makes the prompt
    moot.
-3. The existing **Update screen** grows the controls the prompt hands off to.
+4. The existing **Update screen** grows the controls the prompt hands off to.
 
-### 1. The prompt
+### 1. The ambient indicator (added 2026-07-29)
 
-A sheet over the dial face (idiom: `SCR_QUICK`'s bottom sheet, which is
-already a screen the router shows over the dial), NOT a hard modal that blocks
-the temperature control underneath any longer than a tap.
+"Update available", small and `ink_secondary`, on both `scr_dial.c` (the
+dead patch below the power disc that also carries the M6 "Finalizing
+update..." pending-verify caption — the two are mutually exclusive in
+practice, `pending_verify` wins the rare tick both are true) and
+`scr_standby.c` (same slot, otherwise empty on that face). Shown whenever
+`ota.status == OTA_AVAILABLE` and it is not night — no other conditions: no
+idle window, no once-a-day ceiling, no interaction with `ota_skip`/
+`ota_defer`. Those govern the sheet below, not this; a user who tapped
+"Later" on the sheet still benefits from knowing an update exists. Hidden
+entirely (not dimmed) at night — a bedside device must not advertise
+anything at 3am.
+
+Tappable on the dial face (opens `SCR_UPDATE`) — small text, so it carries
+an `ext_click_area` the way the setpoint handle does, capped short of this
+project's usual >=72px floor because the slot sits directly under the power
+disc's own hit box. NOT tappable on the standby face: that screen's entire
+surface is already a single wake target, and the wake-consumes-first-input
+rule owns it.
+
+### 2. The prompt
+
+A sheet over the dial face (this project's bottom-sheet idiom — slides up
+over the dial face, dismissed by a down swipe, already a screen the router
+shows over the dial), NOT a hard modal that blocks the temperature control
+underneath any longer than a tap.
 
 Copy:
 
@@ -64,11 +88,26 @@ Actions:
 
 Dismissing by swipe behaves as **Later**.
 
-#### When the prompt may appear
+#### When the prompt may appear (reworked 2026-07-29)
 
-All of these must hold. Any one failing defers silently to the next evaluation.
+**Revision history:** the original design (below, superseded) gated the
+sheet on an idle window — `DPWR_ACTIVE` plus 10-30s of no input. That window
+only exists between "the display has settled" and "the display is about to
+dim", i.e. after the user has typically already walked away, and the
+gate was re-evaluated continuously, so a touch (which resets idle time)
+withdrew the sheet mid-reach. It also stamped the once-per-24h `ota_shown`
+ceiling on that same empty-room raise, so the realistic outcome was: sheet
+raises into an empty room, dims away 20s later, and can't return for a day —
+repeating forever. The rework separates "knowing an update exists" (the
+ambient indicator on `scr_dial.c`/`scr_standby.c` — unconditional on
+`ota.status == OTA_AVAILABLE` and not-night, no other gates) from "offering
+one-tap install" (this sheet, below).
 
-| Gate | Reason |
+The sheet is now raised on a **wake edge** — `dial_power_level()` observed
+going from `DPWR_STANDBY`/`DPWR_DIMMED` to `DPWR_ACTIVE` (never on the
+initial boot transition) — checked once, at that instant, against:
+
+| Entry gate | Reason |
 |---|---|
 | `ota.status == OTA_AVAILABLE` | nothing to offer otherwise |
 | Not the skipped version | see `ota_skip` below |
@@ -76,15 +115,24 @@ All of these must hold. Any one failing defers silently to the next evaluation.
 | Not prompted in the last 24h | independent ceiling on frequency |
 | **Not in the sleep window** | the single most important rule; reuse the same night flag `dial_power_set_night()` is driven from |
 | `phase == PH_READY` and `have_state` | never nag a dial that is already failing |
-| Display level is `DPWR_ACTIVE` and >=3s since wake | so a wake-and-adjust is never intercepted; the wake-consumes-first-input rule already means the first touch does nothing else |
-| No knob detent or pending write in the last 10s | never interrupt an adjustment in progress |
 | `dial_time_valid()` | 23h/24h logic needs a real clock |
 | Auto-update is Off | if it's on, the dial will handle it; don't ask |
+
+No idle-window gate — a wake edge IS the "a human is provably present"
+signal the idle window used to approximate.
+
+Once raised, the sheet is sticky (it is NOT re-evaluated against the table
+above on every tick — that re-evaluation was the mid-reach-withdrawal bug).
+It stays until the user acts (Update now / Later / Update options /
+swipe-dismiss, `scr_update_prompt.c`), or one of three **separate exit
+checks** fires: the display made it all the way back to `DPWR_STANDBY`,
+night began, or `ota.status` stopped being `OTA_AVAILABLE`. A touch is
+deliberately not one of them.
 
 Evaluated in the worker's idle poll path, committed as a state flag the router
 reads — same pattern as every other screen decision.
 
-### 2. Auto-update
+### 3. Auto-update
 
 Setting on `SCR_UPDATE`: **Auto-update — Off / Overnight**.
 
@@ -96,8 +144,16 @@ Setting on `SCR_UPDATE`: **Auto-update — Off / Overnight**.
 - **Overnight window**: the dial already knows the sleep schedule. Run the
   install in the quiet stretch **after wake**: `[wakeup + 60min, wakeup +
   180min]` local. Fall back to `[09:00, 11:00]` when no schedule is available.
-  Additional conditions: no user input for >=30 min, `PH_READY`, both zones
-  off (`!zone.on`) if that is knowable, and not currently in the sleep window.
+  Additional conditions: no user input for >=30 min, `PH_READY`, not currently
+  in the sleep window, and no thermal relief active on either zone (a timed
+  boost with a live countdown on screen — genuinely disruptive to interrupt
+  with the install takeover; temporary by construction, so unlike a bed-on
+  check it can never permanently disqualify anyone). Deliberately NOT gated
+  on the zones being on/off (2026-07-29 fix) — the dial is a remote control,
+  not the bed's controller, so its ~30s reboot to apply an install has zero
+  effect on the bed's own operation; a zones-off requirement protected
+  against nothing and silently, permanently starved auto-update for anyone
+  who runs their topper through the day.
 - Install proceeds exactly like a manual one (`dial_ota_download_and_apply`),
   including the takeover screen if someone happens to walk up mid-install, and
   the confirm-on-stable-boot behavior added in v1.0.10 that keeps a
@@ -109,7 +165,7 @@ Setting on `SCR_UPDATE`: **Auto-update — Off / Overnight**.
 - Beta channel interacts cleanly: if Beta builds is on, auto-update tracks
   prereleases too. That is the intended combination for a test dial.
 
-### 3. Update screen additions
+### 4. Update screen additions
 
 `SCR_UPDATE` becomes the single place update behavior is controlled:
 

@@ -1,17 +1,33 @@
 /*
  * SCR_UPDATE_PROMPT — the dismissible "update available" sheet
  * (docs/SPEC-update-prompt.md). Routed by main.c's nav_policy, not reached by
- * a deliberate swipe/tap the way SCR_QUICK is: the worker's idle loop raises
- * app_state_t.ota_prompt_due only once every gate in the spec's table holds
- * (status AVAILABLE, not skipped, not deferred, not shown in the last 24h,
- * outside the sleep window, PH_READY, display settled awake, quiet input,
- * a real clock, and Auto-update Off), and nav_policy shows this screen
- * exactly then — see nav_policy's own comment for why it's scoped to
- * SCR_DIAL specifically (never yanks the user out of Settings/Menu/etc).
+ * a deliberate swipe/tap the way every other sub-screen is: the worker raises
+ * app_state_t.ota_prompt_due on a WAKE EDGE (DPWR_STANDBY/DIMMED ->
+ * DPWR_ACTIVE) when every entry gate holds at that instant (status
+ * AVAILABLE, not skipped, not deferred, not shown in the last 24h, outside
+ * the sleep window, PH_READY, a real clock, and Auto-update Off — no idle
+ * window; a wake edge IS the "a human is provably present" signal), and
+ * nav_policy shows this screen exactly then — see nav_policy's own comment
+ * for why it's scoped to SCR_DIAL specifically (never yanks the user out of
+ * Settings/Menu/etc). Once raised the worker does NOT keep re-evaluating
+ * that gate list — see main.c's "Update prompt: exit" comment for the three
+ * separate conditions (display back to STANDBY / night / update no longer
+ * available) that withdraw it instead; a touch is deliberately not one of
+ * them, which is the whole point of the rework (the old continuously
+ * re-evaluated idle-window gate withdrew the sheet the instant a touch
+ * reset idle time, i.e. mid-reach).
  *
- * Visually this is the SCR_QUICK sheet idiom (slides up over the dial face,
- * dismissed by a down swipe) — but sized to the full screen rather than
- * QUICK's partial bottom sheet: the spec's copy (heading + version + a
+ * Input guard: the wake-consumes rule only swallows the FIRST touch of the
+ * wake that raised this sheet (main.c's touch_filter/knob_step, upstream of
+ * this screen entirely) — a second, reflex touch from someone who actually
+ * meant to adjust temperature can land here within a couple hundred ms.
+ * s_created_at_tick (stamped in create()) + OTA_PROMPT_GUARD_MS makes every
+ * button handler below a no-op for the first 400ms this screen exists, so
+ * that reflex touch can't land on "Update now".
+ *
+ * Visually this is this project's bottom-sheet idiom (slides up over the
+ * dial face, dismissed only by its own buttons (a down swipe used to do it; removed after it fired while users tried to scroll the options)) — but sized to the full screen
+ * rather than a partial sheet: the spec's copy (heading + version + a
  * two-line install-cost paragraph + two buttons meeting explicit >=88/>=72px
  * minimums + a third text row) does not fit a partial sheet's safe band on a
  * 360px round panel without risking the round bezel clipping the lower
@@ -19,10 +35,10 @@
  * already spend end to end). The "sheet, not a hard modal" requirement the
  * spec cares about is about DISMISSAL COST (one tap/swipe, never a multi-step
  * flow blocking the temperature control), not literal screen coverage — this
- * screen still slides in/out with SCR_QUICK's exact motion and every exit is
+ * screen still slides in/out with that same sheet motion and every exit is
  * a single action, so that requirement holds either way.
  *
- * Every exit path (Update now / Later / Update options / swipe-down) clears
+ * Every exit path (Update now / Later / Update options / the Later button) clears
  * ota_prompt_due itself, synchronously, before or alongside navigating away
  * — see dial_state_clear_ota_prompt_due()'s comment for why this can't be
  * left to the worker's own next idle tick (a race that would otherwise let
@@ -55,7 +71,22 @@ static lv_obj_t *s_row_options, *s_row_options_lbl;
 static zone_idx_t s_zone = ZONE_A;   // dial face to return to on dismiss
 static bool       s_apply_sent;      // latches "Update now" so a stray re-render doesn't reset the label
 
-/* ---- sheet slide anim (ported from scr_quick.c, same timings) ----------*/
+// Input guard (docs/SPEC-update-prompt.md's wake-edge rework): this sheet
+// now only ever appears immediately after a wake, and the wake-consumes
+// rule only swallows the FIRST touch of that wake end-to-end — main.c's
+// touch_filter/knob_step, not this screen. Someone who woke the dial meaning
+// to adjust temperature (not read a dialog) will often touch again right
+// away, and without a guard that second touch can land on "Update now"
+// before they've even registered what's on screen. lv_tick_get() stamped in
+// create(); each button handler below returns early while
+// lv_tick_elaps(s_created_at_tick) is still under this. Deliberately NOT
+// applied to on_gesture's swipe-dismiss — a directional drag isn't the
+// "reflex second tap" shape this guards against, and swallowing a genuine
+// swipe-to-dismiss buys nothing.
+#define OTA_PROMPT_GUARD_MS 400
+static uint32_t s_created_at_tick;
+
+/* ---- sheet slide anim (this project's bottom-sheet timings) ------------*/
 
 static void set_y_cb(void *obj, int32_t v) { lv_obj_set_y((lv_obj_t *)obj, (lv_coord_t)v); }
 
@@ -100,6 +131,7 @@ static void dismiss(void)
 static void btn_now_cb(lv_event_t *e)
 {
     (void)e;
+    if (lv_tick_elaps(s_created_at_tick) < OTA_PROMPT_GUARD_MS) return;
     if (s_apply_sent) return;
     dial_haptics_play(HAPTIC_CONFIRM);
     dial_state_clear_ota_prompt_due();
@@ -114,6 +146,7 @@ static void btn_now_cb(lv_event_t *e)
 static void btn_later_cb(lv_event_t *e)
 {
     (void)e;
+    if (lv_tick_elaps(s_created_at_tick) < OTA_PROMPT_GUARD_MS) return;
     dial_haptics_play(HAPTIC_TICK);
     dial_state_set_ota_defer((uint32_t)time(NULL) + OTA_DEFER_SECONDS);
     dismiss();
@@ -122,6 +155,7 @@ static void btn_later_cb(lv_event_t *e)
 static void row_options_cb(lv_event_t *e)
 {
     (void)e;
+    if (lv_tick_elaps(s_created_at_tick) < OTA_PROMPT_GUARD_MS) return;
     dial_haptics_play(HAPTIC_TICK);
     dial_state_clear_ota_prompt_due();
     ui_router_go(SCR_UPDATE, NULL, LV_SCR_LOAD_ANIM_NONE);
@@ -159,6 +193,7 @@ static void create(lv_obj_t *scr, void *arg)
 {
     s_zone = (zone_idx_t)(uintptr_t)arg;
     s_apply_sent = false;
+    s_created_at_tick = lv_tick_get();   // input guard — see its own comment above
     const dial_palette_t *pal = PAL();
     lv_obj_set_style_bg_color(scr, pal->bg, 0);
 
@@ -170,8 +205,8 @@ static void create(lv_obj_t *scr, void *arg)
     lv_obj_set_style_bg_opa(s_sheet, LV_OPA_COVER, 0);
     lv_obj_clear_flag(s_sheet, LV_OBJ_FLAG_SCROLLABLE);
 
-    // Grab bar — same "this is a sheet, not just another screen" cue
-    // SCR_QUICK opens with.
+    // Grab bar — same "this is a sheet, not just another screen" cue every
+    // bottom sheet in this project opens with.
     s_grab = lv_obj_create(s_sheet);
     lv_obj_set_size(s_grab, 40, 4);
     lv_obj_set_style_radius(s_grab, 2, 0);
@@ -278,12 +313,17 @@ static bool on_knob(int detents) { (void)detents; return false; }
 
 static bool on_gesture(lv_dir_t dir)
 {
-    // Dismissing by swipe behaves as "Later" (spec).
-    if (dir != LV_DIR_BOTTOM) return false;
-    dial_haptics_play(HAPTIC_TICK);
-    dial_state_set_ota_defer((uint32_t)time(NULL) + OTA_DEFER_SECONDS);
-    dismiss();
-    return true;
+    // Swipe-to-dismiss is deliberately GONE (owner, 2026-08-04: "I tried to
+    // scroll through the options and it closed on me"). Three stacked options
+    // look like a list, so a downward drag is what a user naturally tries in
+    // order to read them — and it was being taken as "Later", silently
+    // deferring the prompt for 23 hours. The sheet already offers an explicit
+    // Later button, so the gesture bought nothing and cost the one
+    // interaction people actually attempt. The knob is likewise inert here
+    // (on_knob returns false): with no encoder push there is nothing for a
+    // focus ring to activate, so moving focus would be a dead end.
+    (void)dir;
+    return false;
 }
 
 const ui_screen_t scr_update_prompt = {

@@ -16,11 +16,21 @@
  * summarize two independent percentages.
  *
  * Row order (owner-approved): Back, Adjustment mode, Brightness, Scale,
- * Units, Haptics, Rotation, Re-link Orion, Factory reset. Settings a user
- * returns to sit on top — what the knob does to the bed (Adjustment mode)
- * and brightness on a bedside device are the two people actually revisit.
- * Install-once display prefs (Scale/Units/Haptics/Rotation) sit below that;
- * the destructive rows stay last, unchanged.
+ * Units, Haptics, Rotation, Away mode, Re-link Orion, Factory reset. Settings
+ * a user returns to sit on top — what the knob does to the bed (Adjustment
+ * mode) and brightness on a bedside device are the two people actually
+ * revisit. Install-once display prefs (Scale/Units/Haptics/Rotation) sit
+ * below that; Away mode (moved here from the now-removed SCR_QUICK sheet)
+ * sits directly above the destructive rows, which stay last, unchanged.
+ *
+ * "Screen timeout" (the lock-screen/standby idle threshold, dial_power's
+ * STANDBY level — owner request: "a configurable lock screen timer... in an
+ * appropriate location") was added directly below Brightness: both rows
+ * govern what the panel is doing when nobody's touching it, so they read as
+ * one group rather than being split across the list. Tap cycles through the
+ * five values dial_state.h's DIAL_SCR_TIMEOUT_CHOICES offers (30s/1m/2m/5m/
+ * 10m — same idiom as Rotation below, not a submenu; five values don't need
+ * one).
  */
 #include "ui_screens_internal.h"
 #include "dial_haptics.h"
@@ -33,7 +43,8 @@
 
 static lv_obj_t *s_title_lbl;
 static lv_obj_t *s_list;
-static lv_obj_t *s_val_scale, *s_val_units, *s_val_adjust_mode, *s_val_haptics, *s_val_rotation;
+static lv_obj_t *s_val_scale, *s_val_units, *s_val_adjust_mode, *s_val_haptics, *s_val_rotation, *s_val_away;
+static lv_obj_t *s_val_screen_timeout;
 
 typedef enum { CONFIRM_RELINK = 0, CONFIRM_FACTORY, CONFIRM_COUNT } confirm_id_t;
 static lv_obj_t   *s_val_confirm[CONFIRM_COUNT];
@@ -166,12 +177,14 @@ static void row_units_cb(lv_event_t *e)
 // does to a knob turn hours from now — that explanation is the whole point
 // of the sub-screen, so this row just points at it (see app_state_t.sched_follow
 // and main.c's temp_write_phase()/sleep_phase_now() for the write-path logic
-// the choice picks).
+// the choice picks). arg 0 = "came from Settings" (see scr_adjust_mode.c's
+// header comment for its full origin-arg encoding) — this is one of that
+// screen's three entry points, and its Back/swipe-right returns here.
 static void row_adjust_mode_cb(lv_event_t *e)
 {
     (void)e;
     dial_haptics_play(HAPTIC_TICK);
-    ui_router_go(SCR_ADJUST_MODE, NULL, LV_SCR_LOAD_ANIM_MOVE_LEFT);
+    ui_router_go(SCR_ADJUST_MODE, (void *)(uintptr_t)0, LV_SCR_LOAD_ANIM_MOVE_LEFT);
 }
 
 // Off -> Low -> High -> Auto -> Off, same cycle-through-a-fixed-set idiom
@@ -212,6 +225,40 @@ static void row_brightness_cb(lv_event_t *e)
     (void)e;
     dial_haptics_play(HAPTIC_TICK);
     ui_router_go(SCR_BRIGHTNESS_MENU, NULL, LV_SCR_LOAD_ANIM_MOVE_LEFT);
+}
+
+// Screen (lock/standby) timeout: how long the dial sits idle before
+// dial_power drops the display into its dim standby clock face. Cycles
+// through the five values dial_state.h's DIAL_SCR_TIMEOUT_CHOICES offers
+// (30s/1m/2m/5m/10m — no "Never", see that table's comment), same
+// tap-to-advance idiom as Rotation above. Applies immediately with nothing
+// further to poke here: dial_power's power_task reads the preference LIVE
+// on every 100ms tick (see dial_power.h's dial_power_brightness_changed
+// comment for why this pref, unlike brightness, needs no separate "changed"
+// call).
+static void row_screen_timeout_cb(lv_event_t *e)
+{
+    (void)e;
+    app_state_t st;
+    dial_state_get(&st);
+    uint16_t next = dial_scr_timeout_next(st.screen_timeout_s);
+    dial_haptics_play(HAPTIC_TICK);
+    dial_state_set_screen_timeout_s(next);
+}
+
+// Away mode (moved here from the removed SCR_QUICK sheet — owner decision,
+// §4): "is_away" posted straight to the worker via the existing CMD_AWAY,
+// rendered from app_state_t.away, which is session-optimistic (set_away has
+// no readback — see that field's own comment in dial_state.h) same as it
+// always was on the sheet.
+static void row_away_cb(lv_event_t *e)
+{
+    (void)e;
+    app_state_t st;
+    dial_state_get(&st);
+    dial_haptics_play(HAPTIC_CONFIRM);
+    app_cmd_t cmd = { .kind = CMD_AWAY, .a = st.away ? 0 : 1 };
+    dial_cmd_post(&cmd);
 }
 
 static void row_relink_cb(lv_event_t *e)
@@ -280,10 +327,12 @@ static void create(lv_obj_t *scr, void *arg)
     lv_obj_align(s_val_adjust_mode, LV_ALIGN_LEFT_MID, 0, 16);
 
     make_row(s_list, "Brightness",    row_brightness_cb,    NULL);
+    make_row(s_list, "Screen timeout", row_screen_timeout_cb, &s_val_screen_timeout);
     make_row(s_list, "Scale",         row_scale_cb,         &s_val_scale);
     make_row(s_list, "Units",         row_units_cb,         &s_val_units);
     make_row(s_list, "Haptics",       row_haptics_cb,       &s_val_haptics);
     make_row(s_list, "Rotation",      row_rotation_cb,      &s_val_rotation);
+    make_row(s_list, "Away mode",     row_away_cb,          &s_val_away);
     make_row(s_list, "Re-link Orion", row_relink_cb,        &s_val_confirm[CONFIRM_RELINK]);
     make_row(s_list, "Factory reset", row_factory_reset_cb, &s_val_confirm[CONFIRM_FACTORY]);
 
@@ -317,7 +366,8 @@ static void destroy(void)
     if (s_confirm_timer) { lv_timer_del(s_confirm_timer); s_confirm_timer = NULL; }
     s_list = NULL;
     s_title_lbl = NULL;
-    s_val_scale = s_val_units = s_val_adjust_mode = s_val_haptics = s_val_rotation = NULL;
+    s_val_scale = s_val_units = s_val_adjust_mode = s_val_haptics = s_val_rotation = s_val_away = NULL;
+    s_val_screen_timeout = NULL;
     for (int i = 0; i < CONFIRM_COUNT; i++) s_val_confirm[i] = NULL;
     s_armed = CONFIRM_COUNT;
 }
@@ -338,6 +388,8 @@ static void on_state(const app_state_t *st)
     else
         lv_label_set_text(s_val_units, st->units_c ? "\xC2\xB0" "C" : "\xC2\xB0" "F");
     lv_label_set_text(s_val_adjust_mode, st->sched_follow ? "Schedule" : "Hold");
+    lv_label_set_text(s_val_away, st->away ? "On" : "Off");
+    lv_label_set_text(s_val_screen_timeout, dial_scr_timeout_label(st->screen_timeout_s));
     // Indexed directly by the stored value (see app_state_t.haptics_level):
     // 0=Off, 1=Auto, 2=Low, 3=High.
     static const char *HAPTICS_TXT[] = { "Off", "Low", "Auto", "High" };   // index == haptic_level_t

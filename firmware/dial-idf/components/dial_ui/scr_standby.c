@@ -16,6 +16,7 @@
  * the note on tap_cb.
  */
 #include "ui_screens_internal.h"
+#include "dial_ota.h"
 #include <time.h>
 
 LV_FONT_DECLARE(dial_font_num_88)
@@ -27,6 +28,7 @@ LV_FONT_DECLARE(dial_font_num_88)
 static lv_obj_t *s_ring;
 static lv_obj_t *s_clock_lbl, *s_date_lbl;
 static lv_obj_t *s_dot_left, *s_dot_right;   // left=ZONE_B (partner), right=ZONE_A (home)
+static lv_obj_t *s_ota_lbl;   // ambient "Update available" — see create()
 static lv_timer_t *s_clock_timer;
 
 static zone_idx_t s_zone = ZONE_A;   // last-shown side; wake target
@@ -81,6 +83,21 @@ static void apply_palette_and_state(const app_state_t *st)
     lv_obj_set_style_text_color(s_date_lbl, pal->ink_secondary, 0);
     // Deliberately dimmer than the ember ink at night so the room stays dark.
     lv_obj_set_style_text_color(s_clock_lbl, night ? pal->neutral_holding : pal->ink_primary, 0);
+
+    // Ambient "Update available" (owner reassessment,
+    // docs/SPEC-update-prompt.md) — unconditional on status + night, same
+    // rule scr_dial.c's own copy of this notice uses: no idle window, no
+    // daily ceiling, no skip/defer interaction (those govern the
+    // SCR_UPDATE_PROMPT sheet, not this). Hidden entirely at night rather
+    // than dimmed — a bedside device must not advertise anything at 3am.
+    // Deliberately NOT tappable here (unlike the dial face): this screen's
+    // whole surface is already a single wake target (tap_cb below), and the
+    // wake-consumes-first-input rule owns that touch, not this label.
+    lv_obj_set_style_text_color(s_ota_lbl, pal->ink_secondary, 0);
+    if ((dial_ota_status_t)st->ota.status == OTA_AVAILABLE && !night)
+        lv_obj_clear_flag(s_ota_lbl, LV_OBJ_FLAG_HIDDEN);
+    else
+        lv_obj_add_flag(s_ota_lbl, LV_OBJ_FLAG_HIDDEN);
 
     if (!st->have_state) return;
     // One presence dot per side the bed actually has: a single-zone topper
@@ -155,6 +172,21 @@ static void create(lv_obj_t *scr, void *arg)
     lv_obj_clear_flag(s_dot_right, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_align(s_dot_right, LV_ALIGN_CENTER, 196 - CX, 104 - CY);
 
+    // Ambient "Update available" — same slot scr_dial.c parks its own copy
+    // of this notice in (below the ring's own content, inside its bottom
+    // gap): here that gap is entirely empty (no page dots on this face — it
+    // isn't part of the swipe chain), so there's nothing to collide with.
+    // Plain label, default (non-clickable) flags: a tap anywhere on this
+    // screen — including squarely on this text — must fall through to
+    // tap_cb above and wake, never navigate on its own (see the header
+    // comment's wake rule / apply_palette_and_state's note on why this one
+    // stays passive unlike scr_dial.c's).
+    s_ota_lbl = lv_label_create(scr);
+    lv_obj_set_style_text_font(s_ota_lbl, &lv_font_montserrat_12, 0);
+    lv_label_set_text(s_ota_lbl, "Update available");
+    lv_obj_align(s_ota_lbl, LV_ALIGN_CENTER, 0, 330 - CY);
+    lv_obj_add_flag(s_ota_lbl, LV_OBJ_FLAG_HIDDEN);
+
     render_clock();
     s_clock_timer = lv_timer_create(clock_timer_cb, 1000, NULL);
 }
@@ -162,7 +194,7 @@ static void create(lv_obj_t *scr, void *arg)
 static void destroy(void)
 {
     if (s_clock_timer) { lv_timer_del(s_clock_timer); s_clock_timer = NULL; }
-    s_ring = s_clock_lbl = s_date_lbl = s_dot_left = s_dot_right = NULL;
+    s_ring = s_clock_lbl = s_date_lbl = s_dot_left = s_dot_right = s_ota_lbl = NULL;
 }
 
 static void on_state(const app_state_t *st)

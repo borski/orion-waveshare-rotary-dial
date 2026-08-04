@@ -10,6 +10,8 @@
  */
 #include "ui_screens_internal.h"
 #include "dial_haptics.h"
+#include "dial_ota.h"
+#include "dial_icons.h"
 #include <math.h>
 #include <time.h>
 
@@ -60,11 +62,21 @@ static lv_obj_t *s_underline_solid, *s_underline_dash;
 static lv_obj_t *s_water_lbl;
 static lv_obj_t *s_num_box, *s_temp_lbl;
 static lv_obj_t *s_unit_lbl;
-static lv_obj_t *s_pill, *s_pill_glyph, *s_pill_word;
+static lv_obj_t *s_pill, *s_pill_glyph, *s_pill_word, *s_pill_close;
 static lv_obj_t *s_power_btn, *s_power_glyph;
+// Boost glyphs capping the two ends of the arc (owner: relocate the boost
+// controls off the dial face and onto "the end of the arc" itself — see the
+// #3c block in create() for the geometry and the handle-precedence note).
+// s_boost_cool_icon/s_boost_heat_icon are the glyphs only, purely visual;
+// s_boost_cool_tap/s_boost_heat_tap are the real (invisible) touch targets,
+// a separate object biased inward from the glyph.
+static lv_obj_t *s_boost_cool_pad, *s_boost_heat_pad;
+static lv_obj_t *s_boost_cool_icon, *s_boost_heat_icon;
+static lv_obj_t *s_boost_cool_tap, *s_boost_heat_tap;
 static lv_obj_t *s_dot_a, *s_dot_b, *s_dot_menu;
 static lv_obj_t *s_away_lbl;
-static lv_obj_t *s_ota_lbl;   // "Finalizing update..." — see create()
+static lv_obj_t *s_ota_lbl;   // OTA notice, dual-purpose: "Finalizing
+                               // update..." / "Update available" — see create()
 static lv_point_t s_dash_pts[2];
 
 static zone_idx_t s_zone = ZONE_A;
@@ -209,11 +221,16 @@ static uint16_t level_angle(float f)
 
 // Point the arc (and thus level_angle) at the range the current scale needs.
 // Cheap and idempotent — only touches the widget when the range actually
-// changes (a mode toggle), so it never disturbs an in-progress drag.
-static void configure_arc_range(void)
+// changes (a mode toggle OR a fresh device-reported range landing), so it
+// never disturbs an in-progress drag. Absolute mode's rails come from the
+// device itself (dial_state_temp_min_f/_max_f — owner: use Orion's own
+// min/max, not a hardcoded guess), falling back to DIAL_TEMP_MIN_F/MAX_F
+// only before discovery has run; relative mode's 21-level table is
+// untouched by this and keeps its own fixed rails.
+static void configure_arc_range(const app_state_t *st)
 {
-    int mn = s_rel ? DIAL_REL_MIN_F : DIAL_TEMP_MIN_F;
-    int mx = s_rel ? DIAL_REL_MAX_F : DIAL_TEMP_MAX_F;
+    int mn = s_rel ? DIAL_REL_MIN_F : dial_state_temp_min_f(st);
+    int mx = s_rel ? DIAL_REL_MAX_F : dial_state_temp_max_f(st);
     if (mn != s_arc_min || mx != s_arc_max) {
         lv_arc_set_range(s_arc, mn, mx);
         s_arc_min = mn;
@@ -306,6 +323,15 @@ static void apply_identity(const dial_palette_t *pal, bool night)
     }
 }
 
+// "Until H:MM" — 12h, no AM/PM, ASCII, same format scr_standby.c's clock
+// uses — shared by every pill state below that shows a future clock time.
+static void format_until(int minutes_from_midnight, char *out, size_t outsz)
+{
+    int h12 = (minutes_from_midnight / 60) % 12;
+    if (h12 == 0) h12 = 12;
+    snprintf(out, outsz, "Until %d:%02d", h12, minutes_from_midnight % 60);
+}
+
 /* ---- palette + state application --------------------------------------- */
 // Re-applied from on_state every render (cheap): both device telemetry and a
 // palette swap (day/night) land here, so neither needs its own code path.
@@ -315,7 +341,7 @@ static void apply_palette_and_state(const app_state_t *st)
     bool night = dial_palette_is_night();
     s_units_c = st->units_c;
     s_rel     = st->rel_mode;
-    configure_arc_range();       // point the arc at this scale's rails
+    configure_arc_range(st);     // point the arc at this scale's rails
     const zone_state_t *z = &st->zones[s_zone];
     zone_kind_t kind = dial_zone_kind(z, st->device_online);
     lv_color_t accent = dial_zone_accent(kind, pal);
@@ -388,42 +414,116 @@ static void apply_palette_and_state(const app_state_t *st)
     if (!s_dragging) position_handle(s_shown_f);
 
     // State pill: surface fill, state-accent border/text/glyph. While relief
-    // is active it takes over the pill entirely (glyph + countdown word),
-    // pre-empting the normal glyph/word grammar below.
+    // is active it takes over the pill entirely (glyph + countdown word +
+    // a trailing close mark), pre-empting the ecobee-style hold/until
+    // grammar below (§3 rework).
     lv_obj_set_style_bg_color(s_pill, pal->surface, 0);
     lv_obj_set_style_border_color(s_pill, relief ? relief_accent : accent, 0);
     lv_obj_set_style_text_color(s_pill_glyph, relief ? relief_accent : accent, 0);
     lv_obj_set_style_text_color(s_pill_word, relief ? relief_accent : accent, 0);
+    // Leading glyph's font switches with it: dial_font_icons_16 — the SAME
+    // face the boost icons (§3c's arc-end glyphs) now use, sized to sit
+    // level with this pill's Mont16 text — see dial_icons.h; the non-relief
+    // glyphs below are stock LV_SYMBOL_* form, which only the Montserrat
+    // font faces carry.
+    lv_obj_set_style_text_font(s_pill_glyph, relief ? &dial_font_icons_16 : &lv_font_montserrat_16, 0);
     const char *glyph;
     char word[24];
     if (relief) {
-        glyph = LV_SYMBOL_CHARGE;
-        if (st->clock_valid) {
-            int64_t now_ms = (int64_t)time(NULL) * 1000;
-            int64_t remain_ms = z->relief_end_ms - now_ms;
-            if (remain_ms < 0) remain_ms = 0;
-            int total_s = (int)(remain_ms / 1000);
-            snprintf(word, sizeof(word), "BOOST %d:%02d", total_s / 60, total_s % 60);
-        } else {
+        // Same glyph choice as the dial-face boost icons (§3c) — flame/
+        // snow3, colored with that icon's own accent (relief_accent
+        // above already is accent_heat/accent_cool by z->relief_heat) — so
+        // the chip visually matches whichever icon started this boost.
+        glyph = z->relief_heat ? DIAL_ICON_FLAME : DIAL_ICON_SNOW3;
+        // "Until H:MM" rather than a ticking countdown (owner request): the
+        // end time is the fact worth knowing, it matches every other state
+        // this chip shows, and it doesn't force a re-render every second.
+        // Falls back to the bare word when the clock isn't usable, since
+        // without it there is no honest time to print.
+        time_t   end_s = (time_t)(z->relief_end_ms / 1000);
+        struct tm end_lt;
+        if (st->clock_valid && z->relief_end_ms > 0 && localtime_r(&end_s, &end_lt))
+            format_until(end_lt.tm_hour * 60 + end_lt.tm_min, word, sizeof(word));
+        else
             snprintf(word, sizeof(word), "BOOST");
-        }
     } else {
-        const char *w;
-        switch (kind) {
-        case ZK_OFFLINE: glyph = LV_SYMBOL_CLOSE; w = "OFFLINE"; break;
-        case ZK_STANDBY: glyph = LV_SYMBOL_STOP;  w = "STANDBY"; break;
-        case ZK_HEATING: glyph = LV_SYMBOL_UP;    w = "HEATING"; break;
-        case ZK_COOLING: glyph = LV_SYMBOL_DOWN;  w = "COOLING"; break;
-        default:         glyph = LV_SYMBOL_MINUS; w = "HOLDING"; break;
+        // §3: the pill's permanent, non-relief job is now "will this setpoint
+        // hold, or expire" — not restating HEATING/COOLING/OFFLINE/STANDBY,
+        // which the arc's accent + chevron pulse and the staleness dot
+        // already carry (ZK_OFFLINE IS !device_online, exactly the staleness
+        // dot's own condition — nothing unique is lost dropping the word).
+        //
+        // Priority (owner refinement): an OFF zone with a bedtime still
+        // ahead today isn't "holding" — nothing is being held, the schedule
+        // is going to switch it ON — so that gets its own case, checked
+        // BEFORE hold_until_min (which only describes the WRITE path for a
+        // zone that's already on). "Still ahead" needs its own clock read
+        // (hold_until_min doesn't cover the off case at all — it's scoped
+        // to write-path behavior, see dial_state.h's comment on the field),
+        // done here with the same clock-validity discipline the relief
+        // countdown above uses: raw time(NULL) gated on st->clock_valid,
+        // not dial_time_now() (that function is worker-only) — this mirrors
+        // the store's own mirror of clock validity rather than adding a new
+        // dial_ui -> dial_time dependency for a one-line comparison.
+        int bed_min;
+        bool off_bedtime_ahead = false;
+        if (!z->on && z->sched_valid && st->clock_valid &&
+            dial_parse_hhmm(z->sched_bedtime, &bed_min)) {
+            time_t now = time(NULL);
+            struct tm lt;
+            localtime_r(&now, &lt);
+            int now_min = lt.tm_hour * 60 + lt.tm_min;
+            off_bedtime_ahead = now_min < bed_min;   // else falls through — bedtime already passed today
         }
-        strlcpy(word, w, sizeof(word));
+
+        if (off_bedtime_ahead) {
+            glyph = LV_SYMBOL_PAUSE;   // paused, not holding — the schedule turns it on
+            format_until(bed_min, word, sizeof(word));
+        } else if (z->hold_until_min < 0) {
+            // z->hold_until_min is the WORKER's answer (main.c's
+            // compute_hold_until_min, refreshed every idle tick — see
+            // dial_state.h's comment on the field) so this half is pure
+            // render, no schedule math here.
+            glyph = LV_SYMBOL_PAUSE;
+            strlcpy(word, "Holding", sizeof(word));
+        } else {
+            glyph = LV_SYMBOL_LOOP;   // "reverts to the schedule" — no clock glyph in this font
+            format_until(z->hold_until_min, word, sizeof(word));
+        }
     }
     lv_label_set_text(s_pill_glyph, glyph);
     lv_label_set_text(s_pill_word, word);
 
-    // The pill is only a tap target while relief is active (tap-to-cancel).
-    if (relief) lv_obj_add_flag(s_pill, LV_OBJ_FLAG_CLICKABLE);
-    else        lv_obj_clear_flag(s_pill, LV_OBJ_FLAG_CLICKABLE);
+    // Trailing close mark: a visual affordance only (the tap target is the
+    // WHOLE chip — see the CLICKABLE toggle right below), stock
+    // LV_SYMBOL_CLOSE (needs no new asset), same accent as the rest of the
+    // chip. Hidden outside relief — there's nothing to close then.
+    lv_obj_set_style_text_color(s_pill_close, relief_accent, 0);
+    if (relief) lv_obj_clear_flag(s_pill_close, LV_OBJ_FLAG_HIDDEN);
+    else        lv_obj_add_flag(s_pill_close, LV_OBJ_FLAG_HIDDEN);
+
+    // The chip has exactly two modes (owner correction — the Holding/Until
+    // tap-to-SCR_ADJUST_MODE hand-off from an earlier pass is GONE; that
+    // screen is reached only from Settings and the power-disc long-press
+    // now): relief active -> the whole chip is one cancel target;
+    // otherwise -> not interactive at all, CLICKABLE cleared so a tap falls
+    // through to whatever's underneath instead of doing something
+    // surprising. ext_click_area only while clickable, so Holding/Until
+    // never claims a bigger invisible hit box than what's actually tappable.
+    // Capped at 4px (not this project's usual 14): the pill sits only 5px
+    // below the setpoint numeral's own box (s_num_box, #8, bottom edge
+    // absolute y=196 vs the pill's top edge y=201) — any more padding here
+    // starts stealing taps off the numeral's dead zone above. Downward there
+    // is much more room (17px to the power disc's now-72px-diameter top
+    // edge), but ext_click_area is uniform on all sides in LVGL 8.4, so the
+    // tighter side sets the number for both.
+    if (relief) {
+        lv_obj_add_flag(s_pill, LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_set_ext_click_area(s_pill, 4);
+    } else {
+        lv_obj_clear_flag(s_pill, LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_set_ext_click_area(s_pill, 0);
+    }
 
     // Chevron pulse tracks the underlying thermal kind, not relief — a boost
     // still pulses (on the charge glyph) while the zone is actively driving
@@ -434,10 +534,98 @@ static void apply_palette_and_state(const app_state_t *st)
     s_chevron_active = pulsing;
     s_chevron_night = night;
 
-    // Power disc.
+    // Power button — the PRIMARY control on this face — always carries a
+    // clearly visible border (owner correction: it used to go to pal->track
+    // when off, which reads as near-invisible against the background, while
+    // the secondary boost buttons below kept a full ring at rest — exactly
+    // backwards). Off: ink_secondary (visible, but quieter than the on
+    // state's accent). On: accent, unchanged.
     lv_obj_set_style_bg_color(s_power_btn, pal->surface, 0);
-    lv_obj_set_style_border_color(s_power_btn, z->on ? accent : pal->track, 0);
+    lv_obj_set_style_border_color(s_power_btn, z->on ? accent : pal->ink_secondary, 0);
     lv_obj_set_style_text_color(s_power_glyph, z->on ? pal->ink_primary : pal->ink_secondary, 0);
+
+    // Boost glyphs capping the arc ends (§3c) — SECONDARY controls, so they
+    // must read quieter than the power button, not louder: no chrome at all
+    // (no fill, no border — they're just glyphs sitting on the ring, not
+    // buttons). Colour (owner, after seeing ink_secondary on hardware: "too
+    // prominent... make them blend in with the arc colour palette, making it
+    // look like the arc"): each glyph is its OWN direction's accent
+    // (accent_cool/accent_heat — the same hue the arc fill uses at that end),
+    // opacity-muted rather than recoloured so it still blends with whatever
+    // is actually drawn underneath it (the arc's own track or fill pixels).
+    // Two candidate rest treatments were rendered and compared pixel-by-pixel
+    // before picking this one:
+    //   - pal->track (max "looks like the arc"): rejected — against the
+    //     rendered PNGs the glyphs were essentially invisible everywhere
+    //     except squarely over bare background; over the arc's own track or
+    //     fill (i.e. most of the time, since they sit ON the ring) they
+    //     vanished completely, worst at night where track/bg are already
+    //     both dim.
+    //   - accent_cool/accent_heat, opacity-muted (this one): keeps the hue
+    //     relationship the arc already encodes (cool end / hot end) while
+    //     dropping the brightness that made ink_secondary pop as a separate
+    //     object.
+    //
+    // Three tiers per glyph, not two (owner, second pass: "no muted variant
+    // for when the pad is off" — a single LV_OPA_60-on-accent rest state was
+    // the liveliest thing on a screen that's supposed to look dormant once
+    // z->on is false, since the arc drops to neutral_standby and the pill
+    // greys out the same way):
+    //   1. THAT direction's relief running -> its own accent, LV_OPA_COVER.
+    //      Unchanged — still the brightest thing here, on purpose.
+    //   2. Zone on, nothing running -> its own accent, LV_OPA_60. Unchanged
+    //      from the first pass; measured legible in every case checked (day
+    //      with the fill passing under it, day over bare track, the night
+    //      palette) — peak ink channel sum stayed >=150 against a <=100
+    //      background in all of them.
+    //   3. Zone off -> pal->neutral_standby (not the direction's accent —
+    //      there's no "which direction" to hint at when the pad is off) at
+    //      LV_OPA_30. Both numbers are lifted directly from how the rest of
+    //      this off face already renders: the arc's own indicator uses
+    //      exactly neutral_standby at exactly LV_OPA_30 for kind==ZK_STANDBY
+    //      (see indic_opa above), so the glyph now fades to the SAME colour
+    //      and SAME intensity as the ring it sits on, rather than inventing
+    //      a fourth "off" look. At night this is the dimmest combination on
+    //      the device (neutral_standby's night value is already close to
+    //      the night bg, and these sit near the rim where the panel's own
+    //      glow is weakest) — checked on a rendered night+off frame; the
+    //      glyphs are barely there, which reads as correct for a dormant
+    //      bedside device at 3am rather than a bug (see the report).
+    // Full-strength on relief still roughly triples the on-rest peak
+    // (measured ~90->239 on the red channel for heat) and is drastically
+    // brighter than the off-rest tier, so lighting up reads as an obvious
+    // state change against either muted rest look, never an ambiguous one.
+    // Boost-icon colour follows what the BED is doing, not what the boost
+    // buttons are (owner, 2026-08-04): zone off -> both neutral; zone on and
+    // actively heating -> flame keeps its accent while the snowflake stays
+    // neutral, and vice versa for cooling. A running relief is subsumed by
+    // this, since a relief always drives the zone into heating or cooling
+    // anyway -- one rule instead of two that could disagree on screen.
+    //
+    // The neutral is neutral_standby (0x585858 by day) rather than
+    // ink_secondary: ink is the TEXT tone and read as glaringly bright out on
+    // the ring when it was tried there. Opacity still steps down when the
+    // zone is off, since everything else on this face quiets then too.
+    bool heating = !strcmp(z->thermal_state, "heating");
+    bool cooling = !strcmp(z->thermal_state, "cooling");
+    lv_color_t cool_rest_color = (z->on && cooling) ? pal->accent_cool : pal->neutral_standby;
+    lv_color_t heat_rest_color = (z->on && heating) ? pal->accent_heat : pal->neutral_standby;
+    lv_opa_t   cool_rest_opa   = z->on ? LV_OPA_70 : LV_OPA_40 + 13;   // ~45% when off
+    lv_opa_t   heat_rest_opa   = cool_rest_opa;
+    // Bead body + rim. The fill is `surface` (the same body the power button
+    // and status chip use) so the icon reads as hardware ON the ring rather
+    // than a hole through it; the rim follows the same active rule as the
+    // glyph it frames. These lines were lost in an earlier edit and the beads
+    // rendered with LVGL's default white — visible immediately in the render.
+    lv_obj_set_style_bg_color(s_boost_cool_pad, pal->surface, 0);
+    lv_obj_set_style_border_color(s_boost_cool_pad, (z->on && cooling) ? pal->accent_cool : pal->track, 0);
+    lv_obj_set_style_bg_color(s_boost_heat_pad, pal->surface, 0);
+    lv_obj_set_style_border_color(s_boost_heat_pad, (z->on && heating) ? pal->accent_heat : pal->track, 0);
+
+    lv_obj_set_style_text_color(s_boost_cool_icon, cool_rest_color, 0);
+    lv_obj_set_style_text_opa(s_boost_cool_icon, (z->on && cooling) ? LV_OPA_COVER : cool_rest_opa, 0);
+    lv_obj_set_style_text_color(s_boost_heat_icon, heat_rest_color, 0);
+    lv_obj_set_style_text_opa(s_boost_heat_icon, (z->on && heating) ? LV_OPA_COVER : heat_rest_opa, 0);
 
     // Staleness dot. Night-quiet errors (design-spec.md's "silent staleness
     // at night"): shown at 40% instead of full opacity after dark, so a
@@ -472,13 +660,40 @@ static void apply_palette_and_state(const app_state_t *st)
     if (st->away) lv_obj_clear_flag(s_away_lbl, LV_OBJ_FLAG_HIDDEN);
     else          lv_obj_add_flag(s_away_lbl, LV_OBJ_FLAG_HIDDEN);
 
-    // Pending-verify notice (OTA rollback fix, M6) — see create() for why
-    // it lives here; mirrors dial_ota_info_t.pending_verify via main.c's
-    // mut_ota(), so it clears the moment ota_confirm_once() (first poll, or
-    // the 30s fallback timer) actually confirms the image.
+    // OTA notice — one shared label, two mutually-exclusive states (see
+    // create() for why both live in this exact slot):
+    //   pending_verify (OTA rollback fix, M6) — "Finalizing update...".
+    //     Mirrors dial_ota_info_t.pending_verify via main.c's mut_ota(), so
+    //     it clears the moment ota_confirm_once() (first poll, or the 30s
+    //     fallback timer) actually confirms the image. Not tappable —
+    //     nothing to do about it but wait.
+    //   OTA_AVAILABLE, not pending_verify, not night — "Update available".
+    //     Passive ambient indicator (owner reassessment,
+    //     docs/SPEC-update-prompt.md): unconditional on status + night, no
+    //     idle window, no daily ceiling, no skip/defer interaction — those
+    //     govern the SCR_UPDATE_PROMPT sheet, not this; a user who deferred
+    //     the sheet still benefits from knowing. Tappable -> SCR_UPDATE.
+    // pending_verify wins the shared slot on the rare tick both are true at
+    // once (a fresh-boot confirm race with a newer release already
+    // published — needs a manual "Check for updates" tap inside the ~30s
+    // confirm window to even reach; the ~24h-uptime auto-checker in main.c
+    // can't land there) — it's the more time-critical of the two.
     lv_obj_set_style_text_color(s_ota_lbl, pal->ink_secondary, 0);
-    if (st->ota.pending_verify) lv_obj_clear_flag(s_ota_lbl, LV_OBJ_FLAG_HIDDEN);
-    else                        lv_obj_add_flag(s_ota_lbl, LV_OBJ_FLAG_HIDDEN);
+    bool ota_finalizing = st->ota.pending_verify;
+    bool ota_avail_notice = !ota_finalizing &&
+                             (dial_ota_status_t)st->ota.status == OTA_AVAILABLE && !night;
+    if (ota_finalizing) {
+        lv_label_set_text(s_ota_lbl, "Finalizing update...");
+        lv_obj_clear_flag(s_ota_lbl, LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_clear_flag(s_ota_lbl, LV_OBJ_FLAG_HIDDEN);
+    } else if (ota_avail_notice) {
+        lv_label_set_text(s_ota_lbl, "Update available");
+        lv_obj_add_flag(s_ota_lbl, LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_clear_flag(s_ota_lbl, LV_OBJ_FLAG_HIDDEN);
+    } else {
+        lv_obj_clear_flag(s_ota_lbl, LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_add_flag(s_ota_lbl, LV_OBJ_FLAG_HIDDEN);
+    }
 }
 
 // The value passed in is always °F — the internal representation. Relative mode
@@ -567,6 +782,17 @@ static void handle_event_cb(lv_event_t *e)
     if (f != s_press_f) post_temp_for(zone, f);   // a tap that didn't move commits nothing
 }
 
+// Tap the ambient "Update available" notice (only clickable while it's
+// showing that text — see apply_palette_and_state) — a light hand-off to
+// SCR_UPDATE, same weight/haptic as scr_update_prompt.c's own "Update
+// options" row. Never armed while it reads "Finalizing update...".
+static void ota_notice_cb(lv_event_t *e)
+{
+    (void)e;
+    dial_haptics_play(HAPTIC_TICK);
+    ui_router_go(SCR_UPDATE, NULL, LV_SCR_LOAD_ANIM_NONE);
+}
+
 static void power_event_cb(lv_event_t *e)
 {
     dial_state_stamp_input();
@@ -587,29 +813,70 @@ static void power_event_cb(lv_event_t *e)
     dial_cmd_post(&cmd);
 }
 
-// Tap the state pill while relief is active (only then is it clickable —
-// see apply_palette_and_state) to cancel the boost early.
+// Tap the state pill: cancels the boost early. This is now the chip's ONLY
+// job (owner correction: an earlier pass also opened SCR_ADJUST_MODE from
+// here when not in relief — dropped; that screen is reached only from
+// Settings and the power-disc long-press now, see power_long_press_cb). The
+// event is only even reachable while relief is active — apply_palette_and_
+// state clears CLICKABLE entirely otherwise (see that render's own comment)
+// — but this still checks s_relief_active as a stale-tap guard: LVGL
+// resolves a press's target at PRESS time, so a relief that ends between
+// press and release could otherwise let a just-stale CLICKED through.
 static void pill_event_cb(lv_event_t *e)
 {
     (void)e;
+    if (!s_relief_active) return;
     dial_haptics_play(HAPTIC_CONFIRM);
+    // Optimistic FIRST, from this task: the worker commits too, but it may be
+    // mid-poll and the queued command would then land seconds later.
+    dial_state_set_relief_optimistic(-1, false, false, 0);   // device-wide, like the call itself
     app_cmd_t cmd = { .kind = CMD_BOOST_CANCEL };
     dial_cmd_post(&cmd);
 }
 
-// Long-press anywhere the screen itself receives the press (numeral, labels,
-// background — the arc and power disc are clickable and keep their own press
-// handling, design-spec.md §4's occlusion note) opens quick-actions.
-static void screen_long_press_cb(lv_event_t *e)
+// Long-press the POWER DISC (§2 — quick-actions' screen-wide long-press is
+// gone; the boost controls and this replace what it carried) opens the
+// Schedule/Hold picker (SCR_ADJUST_MODE) — the same destination temp_write_
+// phase()'s comment in main.c ties directly to the knob's write behavior.
+//
+// A short tap on this same object still just toggles power (power_event_cb,
+// LV_EVENT_CLICKED) — LVGL 8.4 fires CLICKED on release regardless of
+// whether a LONG_PRESSED already fired for that press (verified by reading
+// lv_indev.c's indev_proc_release: it sends CLICKED unconditionally whenever
+// the touch didn't scroll, long-press or not), so without a guard a long
+// press here would open the picker AND toggle the bed on release.
+// lv_indev_wait_release() is this file's existing fix for exactly that
+// shape — screen_long_press_cb used it the same way before quick-actions
+// moved here: it makes LVGL swallow the rest of this touch (a harmless
+// PRESS_LOST, no CLICKED) until the finger actually lifts.
+//
+// Packs `1 + s_zone` as SCR_ADJUST_MODE's origin arg (see that file's
+// header comment for the full encoding) so its Back/swipe-right returns to
+// THIS face/zone instead of hardcoding SCR_SETTINGS — this is one of that
+// screen's three entry points.
+static void power_long_press_cb(lv_event_t *e)
 {
     (void)e;
+    dial_state_stamp_input();
     dial_haptics_play(HAPTIC_TICK);
-    // The finger is still down and the quick sheet is about to slide up under
-    // it; without this, LVGL re-hit-tests the held touch onto whichever row
-    // lands beneath it and fires a phantom CLICKED on release (bed off, away,
-    // ...). wait_release makes LVGL ignore this touch until the finger lifts.
     lv_indev_wait_release(lv_indev_get_act());
-    ui_router_go(SCR_QUICK, (void *)(uintptr_t)s_zone, LV_SCR_LOAD_ANIM_NONE);
+    ui_router_go(SCR_ADJUST_MODE, (void *)(uintptr_t)(1 + s_zone), LV_SCR_LOAD_ANIM_NONE);
+}
+
+// Tap a boost tap-target (§3c — the invisible object at the end of the arc,
+// replacing the old flanking icon buttons, which in turn replaced SCR_QUICK's
+// "Boost heat"/"Boost cool" rows, that screen now gone) straight to the
+// duration picker, packed exactly as the old quick-actions row packed it.
+// user_data carries which end was tapped (1=heat, 0=cool). Neither tap
+// target bubbles its event (the lv_obj default already), so a press here
+// can't also reach the arc/screen underneath.
+static void boost_btn_event_cb(lv_event_t *e)
+{
+    dial_state_stamp_input();
+    dial_haptics_play(HAPTIC_TICK);
+    bool heat = (bool)(uintptr_t)lv_event_get_user_data(e);
+    uintptr_t packed = ((uintptr_t)s_zone << 1) | (heat ? 1u : 0u);
+    ui_router_go(SCR_BOOST, (void *)packed, LV_SCR_LOAD_ANIM_NONE);
 }
 
 static void create(lv_obj_t *scr, void *arg)
@@ -625,7 +892,6 @@ static void create(lv_obj_t *scr, void *arg)
     s_arc_min = s_arc_max = -1;   // force configure_arc_range() on this arc
     const dial_palette_t *pal = PAL();
     lv_obj_set_style_bg_color(scr, pal->bg, 0);
-    lv_obj_add_event_cb(scr, screen_long_press_cb, LV_EVENT_LONG_PRESSED, NULL);
 
     // #2-3 Chassis ring / arc (r=165, w=16, 90deg gap at 6 o'clock).
     s_arc = lv_arc_create(scr);
@@ -677,6 +943,142 @@ static void create(lv_obj_t *scr, void *arg)
     lv_obj_align(s_zero_notch, LV_ALIGN_CENTER, 0, -ARC_R);
     lv_obj_add_flag(s_zero_notch, LV_OBJ_FLAG_HIDDEN);
 
+    // #3c Boost glyphs capping the arc's two ends (owner: relocate the boost
+    // controls off the dial face — "remove the boost iconbuttons where they
+    // currently are and add just the icons to the end of the arc, and if the
+    // tap target on the arc is the end of the arc where the icon is located
+    // then it opens the set boost menu [the old icon buttons' behavior]").
+    //
+    // The arc sweeps 135deg (VALUE-MIN, bottom-left) clockwise to 45deg
+    // (VALUE-MAX, bottom-right) — see value_from_point()/position_handle()
+    // above for the same mapping. Cool sits at the min end, heat at the max
+    // end: this continues both the arc's own semantics AND the left/right
+    // split the old flanking buttons used.
+    //
+    // Two objects per side:
+    //   - s_boost_*_icon: the glyph itself, now dial_font_icons_16 (owner,
+    //     after seeing the 26px version on hardware: "icons don't look
+    //     centered on the end of the arc" + "contain them within the arc's
+    //     bounds, not overflowing"), centered on the arc band's actual
+    //     centerline.
+    //
+    //     That centerline is NOT radius 165 (ARC_R). ARC_R is the arc
+    //     OBJECT's half-size — LVGL draws the ring's OUTER edge there and
+    //     grows the 16px stroke inward, not centered on it. Measured
+    //     directly off a rendered PNG (a vertical pixel scan straight up
+    //     from screen center, where nothing but the ring itself is present):
+    //     ink runs from radius 165 down to ~150, i.e. the band is
+    //     165(outer)-149(inner), centerline ~157 — matching, almost to the
+    //     pixel, position_handle()'s own existing r = span/2 - indic_width/2
+    //     = 165 - 8 = 157 (that function already had this right; it's why
+    //     the handle itself sits correctly on the ring). Centering the icons
+    //     on the OWNER-assumed 165 would put roughly half of each glyph
+    //     outside the ring entirely, into bare background — the opposite of
+    //     "contained within the arc's bounds" — so this uses the measured
+    //     157, not 165. See the report for the full pixel measurement.
+    //     Non-clickable — it's decoration; the tap target is the separate
+    //     object below.
+    //   - s_boost_*_tap: fully transparent, no border — the ACTUAL touch
+    //     target, UNCHANGED by this pass (owner: leave it alone). lv_obj_
+    //     set_ext_click_area() pads symmetrically, so simply padding the
+    //     glyph would waste half of any extra reach off the glass past the
+    //     bezel; instead this is a whole separate ~58px object centered
+    //     further IN, at r=130 (outer edge r=159) — measured ink for the
+    //     16px glyphs above runs r~150-164, so the tap target's outer rim
+    //     still overlaps the glyph's inner half rather than missing it
+    //     entirely now that the icon shrank. Opens SCR_BOOST on tap, packed
+    //     exactly like the old buttons did.
+    //
+    // Z-ORDER / the min-max collision (owner flagged this trade-off going
+    // in): the setpoint handle (#3b, created right below) rides the arc at
+    // this same band and parks EXACTLY at 135deg/45deg at the range
+    // extremes — squarely on top of these icons. LVGL hit-tests
+    // topmost-child-first, so whichever of {handle, boost tap} was added to
+    // the screen LAST wins a press landing in both hit boxes. This block
+    // runs BEFORE the handle's own creation specifically so the handle stays
+    // the later (topmost) object: at min/max the handle keeps full priority
+    // and stays draggable, exactly as everywhere else on the ring. The boost
+    // tap does NOT become unreachable there — it only loses the sliver of
+    // its area that the handle's own ~28px hit-radius covers at that one
+    // point of the ring, degrading to "harder to hit" (aim for the tap
+    // target's inward bulk, away from the handle) — never "handle becomes
+    // undraggable".
+    // Backdrop discs. The glyphs are drawn ABOVE the arc and its fill (see
+    // the move_foreground calls below), but a muted glyph painted straight
+    // onto the bright fill blends into it and reads as being BEHIND the arc
+    // (owner-reported twice — the second time after the stacking was already
+    // proven correct, which is what identified it as contrast rather than
+    // z-order). A small bg-coloured disc under each glyph punches a visual
+    // notch in the ring, so the icon reads the same whether bare track or
+    // full fill passes beneath it.
+    s_boost_cool_pad = lv_obj_create(scr);
+    lv_obj_set_size(s_boost_cool_pad, 26, 26);
+    lv_obj_set_style_radius(s_boost_cool_pad, LV_RADIUS_CIRCLE, 0);
+    lv_obj_set_style_border_width(s_boost_cool_pad, 2, 0);
+    lv_obj_clear_flag(s_boost_cool_pad, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_align(s_boost_cool_pad, LV_ALIGN_CENTER, -111, 111);
+
+    s_boost_heat_pad = lv_obj_create(scr);
+    lv_obj_set_size(s_boost_heat_pad, 26, 26);
+    lv_obj_set_style_radius(s_boost_heat_pad, LV_RADIUS_CIRCLE, 0);
+    lv_obj_set_style_border_width(s_boost_heat_pad, 2, 0);
+    lv_obj_clear_flag(s_boost_heat_pad, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_align(s_boost_heat_pad, LV_ALIGN_CENTER, 111, 111);
+
+    s_boost_cool_icon = lv_label_create(scr);
+    lv_obj_set_style_text_font(s_boost_cool_icon, &dial_font_icons_20, 0);
+    lv_label_set_text(s_boost_cool_icon, DIAL_ICON_SNOW3);
+    lv_obj_clear_flag(s_boost_cool_icon, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_align(s_boost_cool_icon, LV_ALIGN_CENTER, -111, 111);   // r=157 @ 135deg, exact
+
+    s_boost_heat_icon = lv_label_create(scr);
+    lv_obj_set_style_text_font(s_boost_heat_icon, &dial_font_icons_20, 0);
+    lv_label_set_text(s_boost_heat_icon, DIAL_ICON_FLAME);
+    lv_obj_clear_flag(s_boost_heat_icon, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_align(s_boost_heat_icon, LV_ALIGN_CENTER, 111, 111);   // r=157 @ 45deg, exact
+
+    s_boost_cool_tap = lv_obj_create(scr);
+    lv_obj_set_size(s_boost_cool_tap, 76, 76);
+    lv_obj_set_style_radius(s_boost_cool_tap, LV_RADIUS_CIRCLE, 0);
+    lv_obj_set_style_bg_opa(s_boost_cool_tap, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(s_boost_cool_tap, 0, 0);
+    lv_obj_clear_flag(s_boost_cool_tap, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_align(s_boost_cool_tap, LV_ALIGN_CENTER, -92, 92);
+    lv_obj_add_event_cb(s_boost_cool_tap, boost_btn_event_cb, LV_EVENT_CLICKED, (void *)(uintptr_t)0);
+
+    s_boost_heat_tap = lv_obj_create(scr);
+    lv_obj_set_size(s_boost_heat_tap, 76, 76);
+    lv_obj_set_style_radius(s_boost_heat_tap, LV_RADIUS_CIRCLE, 0);
+    lv_obj_set_style_bg_opa(s_boost_heat_tap, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(s_boost_heat_tap, 0, 0);
+    lv_obj_clear_flag(s_boost_heat_tap, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_align(s_boost_heat_tap, LV_ALIGN_CENTER, 92, 92);
+    lv_obj_add_event_cb(s_boost_heat_tap, boost_btn_event_cb, LV_EVENT_CLICKED, (void *)(uintptr_t)1);
+
+    // Explicit z-order guarantee (owner, on hardware: "the boost icons dont
+    // sit above the arc when its on"). Creation order already puts these
+    // four objects after s_arc/s_level/s_zero_notch (all created above) —
+    // verified against rendered pixels too: the glyph's own texture is
+    // visible layered over the fill's rounded end-cap at the cool end in
+    // dial.png, not replaced by solid fill colour, so nothing here was
+    // literally painting over them. But that stacking was implicit (an
+    // accident of where this block happened to sit in the function), and
+    // what actually reads poorly there is low-opacity same-size glyph
+    // sitting exactly on the fill's own rounded cap — a contrast problem,
+    // not a hidden-behind one (see the colour tiers below, and the report
+    // for the pixel evidence). Making the order explicit here removes any
+    // ambiguity either way and survives a future reshuffle of this
+    // function: these four move to front now, and the handle (created
+    // right below) moves to front again after, so it stays topmost of the
+    // whole group — required for it to keep winning both the draw AND the
+    // hit-test at the 135deg/45deg extremes (see that comment above).
+    lv_obj_move_foreground(s_boost_cool_pad);
+    lv_obj_move_foreground(s_boost_heat_pad);
+    lv_obj_move_foreground(s_boost_cool_icon);
+    lv_obj_move_foreground(s_boost_heat_icon);
+    lv_obj_move_foreground(s_boost_cool_tap);
+    lv_obj_move_foreground(s_boost_heat_tap);
+
     // #3b Setpoint handle — the sole touch target for temperature. A thumb on
     // the ring at the current setpoint (created after the arc/fill so it sits on
     // top, at the fill's leading edge): press and drag it around the ring to set
@@ -698,6 +1100,7 @@ static void create(lv_obj_t *scr, void *arg)
     lv_obj_add_event_cb(s_handle, handle_event_cb, LV_EVENT_PRESSING,   (void *)(uintptr_t)s_zone);
     lv_obj_add_event_cb(s_handle, handle_event_cb, LV_EVENT_RELEASED,   (void *)(uintptr_t)s_zone);
     lv_obj_add_event_cb(s_handle, handle_event_cb, LV_EVENT_PRESS_LOST, (void *)(uintptr_t)s_zone);
+    lv_obj_move_foreground(s_handle);   // stays topmost of the whole group, see note above
 
     // #5 Side name.
     s_name_lbl = lv_label_create(scr);
@@ -764,10 +1167,17 @@ static void create(lv_obj_t *scr, void *arg)
     lv_obj_set_style_pad_column(s_pill, 6, 0);
     lv_obj_set_flex_flow(s_pill, LV_FLEX_FLOW_ROW);
     lv_obj_set_flex_align(s_pill, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-    lv_obj_clear_flag(s_pill, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_clear_flag(s_pill, LV_OBJ_FLAG_SCROLLABLE);
+    // CLICKABLE starts cleared (lv_obj_create's own default is ON — this
+    // undoes that) and ext_click_area starts at 0: both are toggled on
+    // ONLY while relief is active, in apply_palette_and_state, so a tap on
+    // an inert Holding/Until chip falls through to whatever's underneath
+    // instead of doing something surprising.
+    lv_obj_clear_flag(s_pill, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_align(s_pill, LV_ALIGN_CENTER, 0, 214 - CY);
-    // CLICKABLE is added/removed per-render (apply_palette_and_state): the
-    // pill is only a tap target while relief is active (tap to cancel boost).
+    // The handler itself is a no-op unless relief is active (see
+    // pill_event_cb) — registering it unconditionally here is harmless
+    // since it can only ever fire while CLICKABLE is actually set.
     lv_obj_add_event_cb(s_pill, pill_event_cb, LV_EVENT_CLICKED, NULL);
 
     s_pill_glyph = lv_label_create(s_pill);
@@ -778,13 +1188,35 @@ static void create(lv_obj_t *scr, void *arg)
     lv_obj_set_style_text_font(s_pill_word, &lv_font_montserrat_16, 0);
     lv_label_set_text(s_pill_word, "--");
 
-    // #11 Power disc.
+    // Trailing close mark (§3) — stock symbol font, since LV_SYMBOL_CLOSE is
+    // only in the Montserrat faces, not the boost icon font. Hidden by
+    // default (apply_palette_and_state shows it only during relief); a third
+    // flex child, so it just falls in after the word with the pill's own
+    // pad_column gap, no extra layout needed.
+    s_pill_close = lv_label_create(s_pill);
+    lv_obj_set_style_text_font(s_pill_close, &lv_font_montserrat_16, 0);
+    lv_label_set_text(s_pill_close, LV_SYMBOL_CLOSE);
+    lv_obj_add_flag(s_pill_close, LV_OBJ_FLAG_HIDDEN);
+
+    // #11 Power disc — now the ONLY control on this row (owner: the boost
+    // controls have moved onto the arc ends, see #3c above; the row they
+    // used to flank this button on is otherwise empty). Short tap toggles
+    // power (CLICKED); long-press opens the Schedule/Hold picker
+    // (LONG_PRESSED, §2) — see power_long_press_cb for how the two are kept
+    // from BOTH firing on one long press. 72px (owner pass 3, from an
+    // earlier boost-button layout pass now superseded) is this project's own
+    // >=72px round-screen touch floor, so this is the smallest the disc can
+    // go without becoming the exception to a rule it usually enforces on
+    // OTHER elements; left unpadded (no ext_click_area) so it doesn't eat
+    // into the "Update available" label's own clearance just below it (the
+    // tighter budget in this row now — see that label's own comment).
     s_power_btn = dial_btn_create(scr);
-    lv_obj_set_size(s_power_btn, 88, 88);
+    lv_obj_set_size(s_power_btn, 72, 72);
     lv_obj_set_style_radius(s_power_btn, LV_RADIUS_CIRCLE, 0);
     lv_obj_set_style_border_width(s_power_btn, 2, 0);
     lv_obj_align(s_power_btn, LV_ALIGN_CENTER, 0, 280 - CY);
     lv_obj_add_event_cb(s_power_btn, power_event_cb, LV_EVENT_CLICKED, (void *)(uintptr_t)s_zone);
+    lv_obj_add_event_cb(s_power_btn, power_long_press_cb, LV_EVENT_LONG_PRESSED, NULL);
     s_power_glyph = lv_label_create(s_power_btn);
     lv_obj_set_style_text_font(s_power_glyph, &lv_font_montserrat_28, 0);
     lv_label_set_text(s_power_glyph, LV_SYMBOL_POWER);
@@ -833,17 +1265,19 @@ static void create(lv_obj_t *scr, void *arg)
     lv_obj_align(s_away_lbl, LV_ALIGN_CENTER, 180 - CX, 44 - CY);
     lv_obj_add_flag(s_away_lbl, LV_OBJ_FLAG_HIDDEN);
 
-    // Pending-verify notice (OTA rollback fix, M6) — tiny, hidden unless
-    // st->ota.pending_verify (a fresh OTA install the bootloader will roll
-    // back on the next power-cycle unless it survives to confirm; see
-    // main.c's ota_confirm_once()). Parked in the one genuinely dead patch
-    // of this carefully-laid-out face rather than a new region: the gap
-    // between the power disc's bottom edge (#11, 280+44=324) and the page
-    // dots (#13, y=340) sits squarely inside the arc's own 90deg gap at 6
-    // o'clock (#2), the same void the disc and dots already share — and,
-    // unlike everything else here, this notice is itself transient (gone
-    // within ~30s of boot, or the first successful poll), so it doesn't
-    // earn a permanent claim on any busier real estate.
+    // OTA notice — dual-purpose (see apply_palette_and_state): the M6
+    // pending-verify "Finalizing update..." caption, and (owner
+    // reassessment) the ambient "Update available" indicator. Both tiny,
+    // both hidden unless their own condition holds. Parked in the one
+    // genuinely dead patch of this carefully-laid-out face rather than a new
+    // region: the gap between the power disc's bottom edge (#11, now
+    // 280+36=316 since the owner-pass-3 shrink) and the page dots (#13,
+    // y=340) sits squarely inside the arc's own
+    // 90deg gap at 6 o'clock (#2), the same void the disc and dots already
+    // share — and neither state this label carries claims the slot
+    // permanently (pending_verify is gone within ~30s of boot; the update
+    // notice disappears the moment the update is installed, skipped, or
+    // night falls).
     s_ota_lbl = lv_label_create(scr);
     lv_obj_set_style_text_font(s_ota_lbl, &lv_font_montserrat_12, 0);
     lv_obj_set_style_text_align(s_ota_lbl, LV_TEXT_ALIGN_CENTER, 0);
@@ -851,6 +1285,22 @@ static void create(lv_obj_t *scr, void *arg)
     lv_obj_clear_flag(s_ota_lbl, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_align(s_ota_lbl, LV_ALIGN_CENTER, 0, 330 - CY);
     lv_obj_add_flag(s_ota_lbl, LV_OBJ_FLAG_HIDDEN);
+    // Touch target for the "Update available" state only (CLICKABLE is
+    // added/removed per-render, same idiom as s_pill above). ext_click_area
+    // mirrors the exact value the setpoint handle uses (#3b above) — this
+    // project's established trick for reaching a legal target off a small
+    // visual element — but capped there rather than pushed toward this
+    // project's >=72px floor: this slot sits immediately below the power
+    // disc's own un-padded hit box (bottom edge now y=316, since the
+    // owner-pass-3 shrink — more clearance to this label's own top edge
+    // than the original 88px disc had), so any more padding here starts
+    // stealing power-toggle taps off the disc's bottom rim. Effective target
+    // ends up
+    // well over 72px wide (the text alone) by ~43px tall — short of 72px
+    // tall for that reason, the same kind of documented shortfall this file
+    // already accepts for the handle itself (~56px there, see #3b).
+    lv_obj_set_ext_click_area(s_ota_lbl, 14);
+    lv_obj_add_event_cb(s_ota_lbl, ota_notice_cb, LV_EVENT_CLICKED, NULL);
 }
 
 static void destroy(void)
@@ -872,8 +1322,11 @@ static void destroy(void)
     s_arc = s_stale_dot = s_name_lbl = NULL;
     s_underline_solid = s_underline_dash = s_water_lbl = NULL;
     s_num_box = s_temp_lbl = s_unit_lbl = NULL;
-    s_pill = s_pill_glyph = s_pill_word = NULL;
+    s_pill = s_pill_glyph = s_pill_word = s_pill_close = NULL;
     s_power_btn = s_power_glyph = NULL;
+    s_boost_cool_pad = s_boost_heat_pad = NULL;
+    s_boost_cool_icon = s_boost_cool_tap = NULL;
+    s_boost_heat_icon = s_boost_heat_tap = NULL;
     s_dot_a = s_dot_b = s_dot_menu = NULL;
     s_away_lbl = NULL;
     s_ota_lbl = NULL;
@@ -951,14 +1404,18 @@ static bool on_knob(int detents)
     // Relative: one detent = exactly one level in the turned direction, from
     // whatever level is displayed (dial_rel_step snaps an off-grid value onto
     // the grid as it moves, so the numeral and the bed always move together).
-    // Absolute: one detent = 1°F within the shipped 55–110 clamp.
+    // Absolute: one detent = 1°F, clamped to s_arc_min/s_arc_max — the same
+    // device-reported (or fallback) rails configure_arc_range() just set,
+    // read back here rather than re-deriving them, since this branch only
+    // runs when s_rel is false (so s_arc_min/max already hold the absolute
+    // range, not the relative one).
     int nf;
     if (s_rel) {
         nf = dial_rel_step(s_shown_f, detents);
     } else {
         nf = s_shown_f + detents;
-        if (nf < DIAL_TEMP_MIN_F) nf = DIAL_TEMP_MIN_F;
-        if (nf > DIAL_TEMP_MAX_F) nf = DIAL_TEMP_MAX_F;
+        if (nf < s_arc_min) nf = s_arc_min;
+        if (nf > s_arc_max) nf = s_arc_max;
     }
     if (nf == s_shown_f) {                          // pinned at the range stop
         dial_haptics_play_soft(HAPTIC_STOP);
@@ -983,9 +1440,10 @@ static bool on_knob(int detents)
 // the bed does. A single-zone topper has no partner face: its one dial sits
 // where the pair would, and a left swipe goes straight to the menu.
 //
-// Quick-actions opens via long-press, not a swipe on the dial itself (see
-// screen_long_press_cb) — up/down are simply unhandled here now that the
-// router forwards all four directions.
+// Boost and the Schedule/Hold picker open via tap/long-press on the icon
+// buttons and power disc, not a swipe on the dial itself (see
+// boost_btn_event_cb / power_long_press_cb) — up/down are simply unhandled
+// here now that the router forwards all four directions.
 static bool on_gesture(lv_dir_t dir)
 {
     if (dir != LV_DIR_LEFT && dir != LV_DIR_RIGHT) return false;

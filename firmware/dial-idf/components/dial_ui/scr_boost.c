@@ -1,15 +1,29 @@
 /*
- * SCR_BOOST — thermal-relief ("boost") duration picker. Reached from
- * SCR_QUICK's "Boost heat"/"Boost cool" rows; arg packs the zone the sheet
- * was opened from together with the heat/cool choice: `(zone<<1)|heat`.
+ * SCR_BOOST — thermal-relief ("boost") duration picker. Reached from the
+ * flame/snowflake icon buttons flanking scr_dial.c's power disc; arg packs
+ * the zone the buttons belong to together with the heat/cool choice chosen
+ * by which glyph was tapped: `(zone<<1)|heat`.
  *
  * The knob steps the duration (+-5min, clamped 5..120, default 30) using the
  * same detent/zoom-bump/range-stop vocabulary as scr_dial's temperature arc;
  * the arc here is display-only (duration/120), not draggable, so a swipe
  * down (cancel) isn't fighting an arc drag for the touch.
+ *
+ * Cancel (owner: "we have no way to cancel out of the boost selection...
+ * clicking on the screen anywhere but the play button should cancel it"):
+ * a tap anywhere that ISN'T the start disc returns to the dial face without
+ * posting CMD_BOOST_START — same tap-anywhere-exit idiom scr_brightness.c
+ * uses (a CLICKED handler on `scr` itself). The arc and numeral box both
+ * stay CLICKABLE-cleared so a tap on either falls through to `scr`; the
+ * start disc is a plain lv_btn (CLICKABLE by construction, and does NOT
+ * bubble its own CLICKED — the lv_obj default), so a tap that lands on it
+ * fires start_event_cb only and never reaches the cancel handler. Swipe-down
+ * (on_gesture) already did this same no-op-cancel and is unchanged.
  */
 #include "ui_screens_internal.h"
 #include "dial_haptics.h"
+
+#include <time.h>
 
 LV_FONT_DECLARE(dial_font_num_88)
 
@@ -104,9 +118,23 @@ static void start_event_cb(lv_event_t *e)
 {
     (void)e;
     dial_haptics_play(HAPTIC_CONFIRM);
+    // Optimistic from THIS task, before the command is queued: the worker
+    // commits the same thing, but it may be mid-poll, and the dial face
+    // should already show the boost by the time this screen tears down.
+    dial_state_set_relief_optimistic(s_zone, true, s_heat,
+                                     (int64_t)time(NULL) * 1000 + (int64_t)s_minutes * 60000);
     app_cmd_t cmd = { .kind = CMD_BOOST_START, .zone = s_zone,
                       .a = s_heat ? 1 : 0, .b = s_minutes };
     dial_cmd_post(&cmd);
+    ui_router_go(SCR_DIAL, (void *)(uintptr_t)s_zone, LV_SCR_LOAD_ANIM_NONE);
+}
+
+// Tap anywhere that ISN'T the start disc (see the header comment) cancels
+// back to the dial face — nothing posted, no boost started.
+static void tap_cancel_cb(lv_event_t *e)
+{
+    (void)e;
+    dial_haptics_play(HAPTIC_TICK);
     ui_router_go(SCR_DIAL, (void *)(uintptr_t)s_zone, LV_SCR_LOAD_ANIM_NONE);
 }
 
@@ -121,6 +149,10 @@ static void create(lv_obj_t *scr, void *arg)
 
     const dial_palette_t *pal = PAL();
     lv_obj_set_style_bg_color(scr, pal->bg, 0);
+    // Tap-anywhere-cancel (see the header comment) — the start disc below
+    // is a plain lv_btn and doesn't bubble, so this only ever fires for a
+    // tap that missed it.
+    lv_obj_add_event_cb(scr, tap_cancel_cb, LV_EVENT_CLICKED, NULL);
 
     // Chassis ring — same geometry as scr_dial's, but display-only here (no
     // drag): CLICKABLE stays cleared so a swipe-down (cancel) passes through

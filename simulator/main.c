@@ -19,6 +19,7 @@
 #include <string.h>
 #include <math.h>
 #include <sys/stat.h>
+#include <time.h>   // scenario_dial_off_bedtime needs the real wall clock
 
 #include "lvgl.h"
 #include "ui_router.h"
@@ -37,6 +38,13 @@
 #ifndef DIAL_SIM_OUTPUT_DIR
 #define DIAL_SIM_OUTPUT_DIR "docs/screens"
 #endif
+
+// The "available" version every OTA scenario advertises. One constant rather
+// than a literal per scenario, because it has to stay AHEAD of the version the
+// simulator reports as installed (stubs.c's esp_app_desc_t, which tracks
+// PROJECT_VER) — otherwise the screenshots show a dial offering to update
+// itself to something it already runs. Bump it with each release.
+#define SIM_OTA_LATEST "1.4.1"
 
 /* ---- host framebuffer + LVGL display driver ----------------------------- */
 
@@ -330,6 +338,28 @@ static void scenario_dial(void)
     snapshot("dial");
 }
 
+// The Home face with the ambient "Update available" indicator (owner
+// reassessment, docs/SPEC-update-prompt.md) — unconditional on
+// ota.status==OTA_AVAILABLE and not-night, no idle window/daily ceiling
+// unlike the SCR_UPDATE_PROMPT sheet (see scenario_update_prompt). Also
+// proves it doesn't collide with the M6 "Finalizing update..."
+// pending_verify caption that shares this same slot: apply_baseline()
+// leaves pending_verify false, so this is the OTA_AVAILABLE side of that
+// shared label. Not exercising the tap-to-SCR_UPDATE affordance here — the
+// label's own presence/position is what needs a permanent screenshot; the
+// simulator's sim_tap harness is reserved for scr_passkey's pre-fill need.
+static void scenario_dial_update(void)
+{
+    apply_baseline();
+    app_state_t *st = sim_state_ptr();
+    st->ota.status = OTA_AVAILABLE;
+    snprintf(st->ota.latest, sizeof(st->ota.latest), SIM_OTA_LATEST);
+    st->generation++;
+    ui_router_go(SCR_DIAL, (void *)(uintptr_t)ZONE_B, LV_SCR_LOAD_ANIM_NONE);
+    pump_ms(600);
+    snapshot("dial-update");
+}
+
 // The Home face in RELATIVE scale. Deliberately a POSITIVE, OFF-GRID setpoint:
 // 30.0C -> 86F, which is level +2 (its anchor is 87F/30.5C) — so the render
 // proves the spliced '+' glyph draws AND that an off-grid device value shows as
@@ -352,19 +382,77 @@ static void scenario_dial_relative(void)
     snapshot("dial-relative");
 }
 
-static void scenario_quick(void)
+// The status pill's "Until H:MM" state (§3 rework) — the ecobee-style
+// counterpart to the default baseline's "Holding" (apply_baseline() leaves
+// hold_until_min at sim_state_reset()'s -1 default, which every other dial
+// scenario above renders as-is). Seeds a real sleep schedule on ZONE_A —
+// bedtime 22:00, phase 1 starting an hour later (23:00), phase 2 two hours
+// after THAT (01:00), wakeup 07:00 — so the state this screenshot bakes in
+// is a coherent one: "currently in phase 1" hands off to phase 2 at 01:00,
+// which is exactly the clock-minutes value poked into hold_until_min below.
+// There is no worker task in this simulator to derive that value FROM the
+// schedule fields (compute_hold_until_min lives in main.c, never linked
+// here — see sim_state.c's own header comment), so both are set by hand:
+// the schedule fields document why, hold_until_min is what actually renders.
+static void scenario_dial_until(void)
 {
     apply_baseline();
-    ui_router_go(SCR_QUICK, (void *)(uintptr_t)ZONE_A, LV_SCR_LOAD_ANIM_NONE);
-    // Capture the sheet exactly as it looks the moment it finishes opening:
-    // grab bar at the top edge, row list at scroll position 0 showing the
-    // first rows. The 180ms open-slide is an lv_anim, so gate on LVGL's own
-    // animation bookkeeping (plus a generous fixed pump first) rather than
-    // guessing — a too-short guess is what once produced a mid-motion frame.
-    pump_ms(400);
-    pump_until_idle(1000);
-    snapshot("quick");
+    app_state_t *st = sim_state_ptr();
+    st->sched_follow = true;
+    zone_state_t *a = &st->zones[ZONE_A];
+    a->sched_valid = true;
+    a->sched_smart_temp_active = true;
+    snprintf(a->sched_bedtime, sizeof(a->sched_bedtime), "22:00");
+    a->sched_bedtime_temp_c = 19.4f;
+    snprintf(a->sched_wakeup, sizeof(a->sched_wakeup), "07:00");
+    a->sched_wakeup_temp_c = 21.1f;
+    a->sched_phase1_offset_min = 60;    // 22:00 + 60min -> phase 1 starts 23:00
+    a->sched_phase1_temp_c = 18.3f;
+    a->sched_phase2_offset_min = 180;   // 22:00 + 180min -> phase 2 starts 01:00
+    a->sched_phase2_temp_c = 20.0f;
+    a->hold_until_min = 60;             // 01:00 -> "Until 1:00"
+    st->generation++;                   // direct field-sets don't bump it; make on_state re-run
+    ui_router_go(SCR_DIAL, (void *)(uintptr_t)ZONE_A, LV_SCR_LOAD_ANIM_NONE);
+    pump_ms(600);
+    snapshot("dial-until");
 }
+
+// The status pill's newest state (owner refinement): a zone that's OFF but
+// still has a bedtime ahead TODAY isn't "holding" — nothing is being held,
+// the schedule is going to switch it on — so the pill shows the pause icon
+// (not the loop icon scenario_dial_until's phase-boundary case uses) with
+// "Until <bedtime>". Unlike scenario_dial_until, scr_dial.c computes this
+// state itself from the REAL wall clock (time(NULL), gated on clock_valid —
+// see that file's own comment for why it doesn't need a worker-computed
+// field the way hold_until_min does), so this scenario seeds a bedtime
+// relative to whenever the simulator actually runs (+4h from now, wrapped
+// past midnight if needed) rather than a fixed clock string — a hardcoded
+// "22:00" would already be in the past for a chunk of the day and silently
+// fall through to a different pill state instead of exercising this one.
+static void scenario_dial_off_bedtime(void)
+{
+    apply_baseline();
+    app_state_t *st = sim_state_ptr();
+    st->clock_valid = true;
+    time_t now = time(NULL);
+    struct tm lt;
+    localtime_r(&now, &lt);
+    int bed_min = ((lt.tm_hour * 60 + lt.tm_min) + 4 * 60) % 1440;   // "bedtime" +4h from now
+    zone_state_t *a = &st->zones[ZONE_A];
+    a->on = false;
+    a->sched_valid = true;
+    snprintf(a->sched_bedtime, sizeof(a->sched_bedtime), "%02d:%02d", bed_min / 60, bed_min % 60);
+    a->sched_bedtime_temp_c = 19.4f;
+    st->generation++;   // direct field-sets don't bump it; make on_state re-run
+    ui_router_go(SCR_DIAL, (void *)(uintptr_t)ZONE_A, LV_SCR_LOAD_ANIM_NONE);
+    pump_ms(600);
+    snapshot("dial-off-bedtime");
+}
+
+// TEMP verification scenario (owner task: "off + night is the dimmest
+// combination on the device ... say what it looks like"). Off zone under the
+// night palette — reuses scenario_dial_off_bedtime's off-zone setup. Not
+// part of the permanent doc set — removed again once inspected.
 
 // Boost-heat duration picker, knob-adjusted off the 30min default to 45 so
 // the render shows a deliberately chosen duration, not just the opening value.
@@ -391,11 +479,11 @@ static void scenario_menu(void)
     apply_baseline();
     app_state_t *st = sim_state_ptr();
     st->ota.status = OTA_AVAILABLE;
-    snprintf(st->ota.latest, sizeof(st->ota.latest), "1.0.10");
+    snprintf(st->ota.latest, sizeof(st->ota.latest), SIM_OTA_LATEST);
     st->generation++;
     ui_router_go(SCR_MENU, NULL, LV_SCR_LOAD_ANIM_NONE);
     pump_ms(300);
-    sim_knob(1);            // Settings -> Update (badge: "1.0.10")
+    sim_knob(1);            // Settings -> Update (badge: SIM_OTA_LATEST)
     pump_ms(300);
     pump_until_idle(800);  // rotor snap is an lv_anim; land before the capture
     snapshot("menu");
@@ -409,7 +497,7 @@ static void scenario_update(void)
     apply_baseline();
     app_state_t *st = sim_state_ptr();
     st->ota.status = OTA_AVAILABLE;
-    snprintf(st->ota.latest, sizeof(st->ota.latest), "1.1.0");
+    snprintf(st->ota.latest, sizeof(st->ota.latest), SIM_OTA_LATEST);
     st->generation++;
     ui_router_go(SCR_UPDATE, NULL, LV_SCR_LOAD_ANIM_NONE);
     pump_ms(300);
@@ -441,7 +529,7 @@ static void scenario_update_prompt(void)
     apply_baseline();
     app_state_t *st = sim_state_ptr();
     st->ota.status = OTA_AVAILABLE;
-    snprintf(st->ota.latest, sizeof(st->ota.latest), "1.3.0");
+    snprintf(st->ota.latest, sizeof(st->ota.latest), SIM_OTA_LATEST);
     st->generation++;
     ui_router_go(SCR_UPDATE_PROMPT, (void *)(uintptr_t)ZONE_A, LV_SCR_LOAD_ANIM_NONE);
     // Same idle-out-the-slide-anim gate scenario_quick uses for its sheet.
@@ -484,17 +572,19 @@ static void scenario_brightness_menu(void)
 
 // The full-screen SCR_BRIGHTNESS picker (replaces the old inline settings-row
 // edit — see scr_brightness.c) opened on the Night row, then knob-adjusted
-// down from the 100% default so the render shows a deliberately chosen
-// value (and the drag handle parked at it) instead of just the untouched
-// opening state — same idiom scenario_boost uses for its own picker.
-// sim_knob(-2) drains as one on_knob(-2) batch: |batch|==2 accelerates to
-// BRI_ACCEL_2_MULT (3%/detent), so 100% -> 100 - 2*3 = 94%.
+// so the render shows a deliberately chosen value (and the drag handle parked
+// at it) rather than the untouched opening state — same idiom scenario_boost
+// uses for its own picker. Turned UP, not down: the picker opens on the stored
+// pref, and Night's shipped default is 0%, so any downward turn just clamps at
+// the floor and documents nothing. sim_knob(+3) drains as one on_knob(+3)
+// batch: |batch|>=3 accelerates to BRI_ACCEL_3_MULT (6%/detent), so
+// 0% -> 0 + 3*6 = 18%.
 static void scenario_settings_brightness(void)
 {
     apply_baseline();
     ui_router_go(SCR_BRIGHTNESS, (void *)(uintptr_t)1 /* night */, LV_SCR_LOAD_ANIM_NONE);
     pump_ms(300);
-    sim_knob(-2);   // 100% -> 94% (accelerated: 2 detents * 3%/detent)
+    sim_knob(3);   // 0% -> 18% (accelerated: 3 detents * 6%/detent)
     pump_ms(300);
     snapshot("brightness");
 }
@@ -504,14 +594,14 @@ static void scenario_settings_brightness(void)
 // same y-offset tuned for "NIGHT BRIGHTNESS" (see scr_brightness.c's create()
 // comment), and that the live preview visibly differs from the Night row
 // above (it previews the NIGHT table's STANDBY duty, deliberately very dim).
-// sim_knob(-3) drains as one on_knob(-3) batch: |batch|>=3 accelerates to
-// BRI_ACCEL_3_MULT (6%/detent), so 100% -> 100 - 3*6 = 82%.
+// sim_knob(+3) drains as one on_knob(+3) batch: |batch|>=3 accelerates to
+// BRI_ACCEL_3_MULT (6%/detent), so the 20% default -> 20 + 3*6 = 38%.
 static void scenario_settings_brightness_clock(void)
 {
     apply_baseline();
     ui_router_go(SCR_BRIGHTNESS, (void *)(uintptr_t)2 /* night clock */, LV_SCR_LOAD_ANIM_NONE);
     pump_ms(300);
-    sim_knob(-3);   // 100% -> 82% (accelerated: 3 detents * 6%/detent)
+    sim_knob(3);   // 20% -> 38% (accelerated: 3 detents * 6%/detent)
     pump_ms(300);
     snapshot("brightness-clock");
 }
@@ -557,6 +647,26 @@ static void scenario_standby(void)
     snapshot("standby");
 }
 
+// The clock face with the ambient "Update available" indicator (see
+// scenario_dial_update's own comment — same owner reassessment, same
+// unconditional status+night gate, no idle window/daily ceiling). Confirms
+// the notice's slot on this face (otherwise-empty gap below the clock/date,
+// no page dots here to collide with) renders correctly. Like scenario_standby
+// itself this bakes in the live wall clock — not meant to be diffed against
+// a checked-in reference; see this file's own header / the caller's note on
+// why standby*.png never stay checked out after a run.
+static void scenario_standby_update(void)
+{
+    apply_baseline();
+    app_state_t *st = sim_state_ptr();
+    st->ota.status = OTA_AVAILABLE;
+    snprintf(st->ota.latest, sizeof(st->ota.latest), SIM_OTA_LATEST);
+    st->generation++;
+    ui_router_go(SCR_STANDBY, (void *)(uintptr_t)ZONE_A, LV_SCR_LOAD_ANIM_NONE);
+    pump_ms(300);
+    snapshot("standby-update");
+}
+
 /* ---- entry point -----------------------------------------------------------*/
 
 int main(void)
@@ -595,8 +705,10 @@ int main(void)
     scenario_sidepick();
     scenario_connecting();
     scenario_dial();
+    scenario_dial_update();
     scenario_dial_relative();
-    scenario_quick();
+    scenario_dial_until();
+    scenario_dial_off_bedtime();
     scenario_boost();
     scenario_menu();
     scenario_update();
@@ -610,7 +722,8 @@ int main(void)
     scenario_about();
     scenario_updating();
     scenario_standby();
+    scenario_standby_update();
 
-    printf("done: 24 screens rendered to %s\n", DIAL_SIM_OUTPUT_DIR);
+    printf("done: 27 screens rendered to %s\n", DIAL_SIM_OUTPUT_DIR);
     return 0;
 }

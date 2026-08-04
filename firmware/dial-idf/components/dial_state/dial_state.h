@@ -33,14 +33,22 @@ typedef enum {
 
 typedef enum { ZONE_A = 0, ZONE_B = 1, ZONE_COUNT = 2 } zone_idx_t;
 
-// ABSOLUTE display range in °F (Fahrenheit/Celsius modes). The device's real
-// range is 10–45°C ≈ 50–113°F, but absolute mode keeps the familiar 55–110
-// the product shipped with (owner decision: widen only in relative mode, so an
-// existing °F user sees no arc/indicator change). Relative mode uses the full
-// 50–113 rails below so all 21 levels are reachable. Orion takes °C; the °F
-// lookup is the linear formula rounded to 0.1°C, so conversion round-trips.
-#define DIAL_TEMP_MIN_F 55
-#define DIAL_TEMP_MAX_F 110
+// ABSOLUTE display range in °F (Fahrenheit/Celsius modes). Superseded at
+// runtime by the device's OWN reported range (list_devices'
+// temperature_range, °C on the wire) — main.c's orion_discover_device()
+// parses and commits it into app_state_t.temp_min_f/temp_max_f; screens read
+// it through dial_state_temp_min_f()/dial_state_temp_max_f() below, never
+// these macros directly, except as the fallback those two functions use
+// before discovery has ever run (fresh boot, offline). Earlier firmware
+// (<=v1.0.x) hardcoded 55-110 here — narrower than the device's real
+// 10-45°C (50-113°F) range on purpose, so an existing °F user's arc wouldn't
+// visibly change — but the owner has since asked for the real range
+// everywhere, so the fallback now matches it exactly: even a dial that has
+// never completed discovery gets the full range, not a narrowed one. Orion
+// takes °C; the °F lookup is the linear formula rounded to 0.1°C, so
+// conversion round-trips.
+#define DIAL_TEMP_MIN_F 50
+#define DIAL_TEMP_MAX_F 113
 
 static inline int   dial_c_to_f(float c) { return (int)lroundf(c * 1.8f + 32.0f); }
 static inline float dial_f_to_c(int f)   { return roundf(((f - 32) / 1.8f) * 10.0f) / 10.0f; }
@@ -127,6 +135,69 @@ static inline bool dial_parse_hhmm(const char *s, int *out_min)
     return true;
 }
 
+/*
+ * Screen (lock/standby) timeout: the fixed set of idle durations Settings'
+ * "Screen timeout" row offers, seconds. Deliberately NOT "Never" — this is a
+ * bedside device whose whole standby design (night dimming, the standby
+ * clock face, dial_power_wake_consumes' wake-eats-first-input rule) exists
+ * to stop it glowing at 3am; an always-on face would be a footgun the rest
+ * of the firmware is built to avoid.
+ *
+ * app_state_t.screen_timeout_s (below) holds this preference; its own
+ * default (90) is deliberately NOT one of these five — see that field's
+ * comment for why. dial_scr_timeout_label treats any value that isn't an
+ * exact member (today only that 90s default) as "nearest to one of these
+ * five, ties toward the LONGER one", so the row always shows one of its own
+ * five labels (a fresh device reads "2m", the nearest to the true 90s).
+ * dial_scr_timeout_next always advances one step PAST that nearest choice —
+ * never just snaps onto it — so even a device's very first tap visibly
+ * changes the label instead of silently reproducing the same nearest choice
+ * the row was already (mis)reporting; only every tap thereafter is a plain
+ * one-step cycle, same idiom as Rotation's modulo.
+ */
+#define DIAL_SCR_TIMEOUT_CHOICES_N 4
+// Seconds only, no "Off": an always-on option was tried and removed as not
+// worth its complexity (it needed an infinite-threshold special case in
+// dial_power, and it defeats the night dimming and clock face this device is
+// built around). Anything above 1m was cut too — on a dial you glance at and
+// walk away from, the useful range is seconds. A device that somehow stored
+// the old 0 sentinel falls back to the 90s default via clamp_screen_timeout_s.
+static const uint16_t DIAL_SCR_TIMEOUT_CHOICES[DIAL_SCR_TIMEOUT_CHOICES_N] = { 5, 15, 30, 60 };
+static const char *const DIAL_SCR_TIMEOUT_LABELS[DIAL_SCR_TIMEOUT_CHOICES_N] = { "5s", "15s", "30s", "1m" };
+
+static inline int dial_scr_timeout_nearest_idx(uint16_t s)
+{
+    int idx = 0, best_d = -1;
+    for (int i = 0; i < DIAL_SCR_TIMEOUT_CHOICES_N; i++) {
+        int d = (int)s - (int)DIAL_SCR_TIMEOUT_CHOICES[i];
+        if (d < 0) d = -d;
+        if (best_d < 0 || d < best_d ||
+            (d == best_d && DIAL_SCR_TIMEOUT_CHOICES[i] > DIAL_SCR_TIMEOUT_CHOICES[idx])) {
+            best_d = d;
+            idx = i;
+        }
+    }
+    return idx;
+}
+
+// Display label for the Screen timeout row — always one of the five choices'
+// own strings (see the block comment above for how an off-menu value like
+// the 90s default maps onto one).
+static inline const char *dial_scr_timeout_label(uint16_t s)
+{
+    return DIAL_SCR_TIMEOUT_LABELS[dial_scr_timeout_nearest_idx(s)];
+}
+
+// Tap-to-cycle step for the Screen timeout row — same idiom as Rotation's
+// plain modulo, just over an irregular set, and ALWAYS moves one step past
+// the nearest choice (see the block comment above) so a tap can never be a
+// silent no-op, even from the off-menu 90s default.
+static inline uint16_t dial_scr_timeout_next(uint16_t cur)
+{
+    int idx = (dial_scr_timeout_nearest_idx(cur) + 1) % DIAL_SCR_TIMEOUT_CHOICES_N;
+    return DIAL_SCR_TIMEOUT_CHOICES[idx];
+}
+
 typedef struct {
     float temp_c;            // setpoint (top-level zones[].temp)
     float actual_c;          // measured water temp (status.zones[].temp); <0 = unknown
@@ -142,6 +213,21 @@ typedef struct {
     bool    relief_heat;      // true = heat, false = cool
     int64_t relief_end_ms;    // epoch MILLISECONDS (API's units, not seconds)
     float   relief_prev_temp_c;
+    bool    relief_prev_on;   // the zone's on/off BEFORE the relief started —
+                              // cancelling restores it, so the UI can predict
+                              // the post-cancel state instead of flashing an
+                              // intermediate one (owner: cancel briefly showed
+                              // "Holding" before settling to off).
+    // Dial-local, never carried on the wire: esp_timer_get_time() when the
+    // four relief_* fields above were last set OPTIMISTICALLY (main.c's
+    // handle_immediate_cmd, CMD_BOOST_START/CANCEL, BEFORE the MCP round
+    // trip) rather than from a get_device_state poll or a relief ack that
+    // already agreed with us. 0 = no optimistic guess in flight. main.c's
+    // mut_device_state and mut_relief_ack both consult this (via
+    // relief_should_preserve_optimistic) to keep the guess alive for a short
+    // window while a poll or a lagging ack that hasn't caught up yet would
+    // otherwise flicker the boost chip back — see RELIEF_OPTIMISTIC_WINDOW_US.
+    int64_t relief_opt_us;
 
     // Tonight's sleep schedule (M5), from get_sleep_schedules — TODAY's entry
     // only (day == dial_time_now's tm_wday), matched to this zone via the
@@ -169,6 +255,25 @@ typedef struct {
     float sched_phase1_temp_c;
     int   sched_phase2_offset_min;
     float sched_phase2_temp_c;
+
+    // Ecobee-style "will this hold, or expire?" for scr_dial.c's status pill.
+    // Computed by the WORKER (main.c's compute_hold_until_min(), which wraps
+    // sleep_phase_now()) mirroring temp_write_phase()'s exact preconditions
+    // (Adjustment mode = Follow schedule, a captured Orion user uuid for this
+    // zone, a valid wall clock, and an active sleep-schedule phase right now)
+    // so the pill states the WRITE PATH'S BEHAVIOUR, not the raw preference —
+    // Schedule mode with no active phase (outside the window, smart temp off,
+    // or no usable schedule) still writes a plain hold, and must say so.
+    // -1 = the setpoint holds until the user changes it ("Holding");
+    // otherwise minutes-from-midnight of the CURRENT phase's own end
+    // boundary ("Until H:MM"). Recomputed every idle tick alongside the
+    // night-window calc (same block, same fresh clock+state read) so a phase
+    // boundary crossing, a fresh schedule fetch, or an Adjustment-mode flip
+    // all land within one tick; committed to the store only on an actual
+    // per-zone change. dial_state_init() seeds this -1 so a fresh boot (or a
+    // screen render before the worker's first idle tick) never shows a bogus
+    // "Until 0:00".
+    int16_t hold_until_min;
 } zone_state_t;
 
 /*
@@ -224,12 +329,27 @@ typedef struct {
     // Which zones the device actually reports (get_device_state's zones[]).
     // Orion also sells SINGLE-ZONE toppers, so a zone entry existing is not a
     // given: everything that assumes a partner side (the side-swap chain, the
-    // page dots, "Match my side", the side picker) must gate on this rather
-    // than on ZONE_COUNT. Valid once have_state; see dial_state_is_dual().
+    // page dots, the side picker) must gate on this rather than on
+    // ZONE_COUNT. Valid once have_state; see dial_state_is_dual().
     bool    zone_present[ZONE_COUNT];
     struct { bool error; char desc[96]; } safety;
     char    water_fill[12];
     bool    away;             // session-optimistic (set_away has no readback)
+    // Device-reported absolute temperature range (list_devices'
+    // temperature_range, °C on the wire), converted once via dial_c_to_f()
+    // and mirrored here as whole °F by main.c's orion_discover_device() —
+    // this, not the DIAL_TEMP_MIN_F/MAX_F constants, is what the arc range /
+    // knob clamp / drag clamp use in ABSOLUTE mode (owner: "use the Orion
+    // reported min/max for limits, not our own"). Relative mode's own
+    // 21-level table (DIAL_REL_MIN_F/MAX_F above) is untouched by this —
+    // that table is tied to Orion's temperature_scale.relative, a different
+    // field, validated by its own discover-time tripwire. -1 = not yet known
+    // (fresh boot, before the first successful list_devices, or a device
+    // that omits the field) — dial_state_temp_min_f()/_max_f() below fall
+    // back to the DIAL_TEMP_MIN_F/MAX_F constants then, which now equal the
+    // device's real rails, so the fallback no longer narrows anything.
+    int     temp_min_f;
+    int     temp_max_f;
 
     // Wall clock
     bool    clock_valid;
@@ -306,6 +426,19 @@ typedef struct {
     // until the user deliberately pulls the two apart. See
     // dial_state_get_bri_night_clock_pct/set_bri_night_clock_pct.
     uint8_t bri_night_clock_pct;
+    // Screen (lock/standby) timeout: idle seconds before dial_power drops the
+    // display to DPWR_STANDBY (its "STANDBY" threshold — see dial_power.c's
+    // power_task, which reads this live every 100ms tick, same as the
+    // brightness prefs above). Settings' "Screen timeout" row offers exactly
+    // DIAL_SCR_TIMEOUT_CHOICES above (30s/1m/2m/5m/10m — deliberately no
+    // "Never", see that table's comment). Default 90 is deliberately NOT one
+    // of those five: it's the exact value this firmware hardcoded as
+    // STANDBY_AFTER_US before this preference existed, so introducing it
+    // changes zero devices' behavior until the user taps the row — see
+    // dial_scr_timeout_label/_next for how the row displays and steps off
+    // that off-menu default. Persisted to NVS "ui"/"scr_to"; see
+    // dial_state_get_screen_timeout_s/set_screen_timeout_s.
+    uint16_t screen_timeout_s;
     // Beta OTA channel opt-in (SCR_UPDATE's "Beta builds" toggle), persisted
     // to NVS "ui"/"beta". dial_state has no business knowing about dial_ota,
     // so this is just the stored preference -- the worker (main.c) reads it
@@ -347,6 +480,14 @@ typedef struct {
         // defined in dial_ota.h. Drives scr_connecting's/scr_dial's
         // "Finalizing update -- keep powered" notice.
         bool pending_verify;
+        // True while an install the USER never asked for is running (the
+        // overnight auto-updater). nav_policy uses it to leave a SLEEPING
+        // dial dark rather than lighting the takeover screen at a bedside
+        // for two minutes to narrate an update nobody is watching. Manual
+        // installs clear it and always take over — the user is standing
+        // there, and a dial that reboots under their hands unexplained is
+        // worse than the interruption.
+        bool unattended;
     } ota;
 
     // --- Update prompt / auto-update (docs/SPEC-update-prompt.md) ---
@@ -378,13 +519,19 @@ typedef struct {
     // Committed by the worker (main.c) the instant it raises ota_prompt_due
     // below -- see dial_state_set_ota_shown.
     uint32_t ota_shown;
-    // Session-only (deliberately NOT persisted): the LIVE "should the update
-    // prompt sheet be showing right now" gate result, continuously
-    // re-evaluated by the worker's idle loop (main.c) and committed only on
-    // change (mirrors s_ui_night's edge-triggered pattern) -- so the worker
-    // itself withdraws the offer the instant any gate stops holding (the
-    // user starts interacting, the display dims, the account goes degraded,
-    // ...) rather than a one-shot latch that could get stuck open.
+    // Session-only (deliberately NOT persisted): "is the update prompt sheet
+    // raised right now" (docs/SPEC-update-prompt.md's 2026-07-29 rework).
+    // Raised by the worker (main.c) on a WAKE EDGE
+    // (DPWR_STANDBY/DPWR_DIMMED -> DPWR_ACTIVE) when every entry gate holds
+    // at that instant -- NOT a continuously re-evaluated condition; once
+    // raised it stays true until the worker's own three separate exit
+    // checks fire (display back to STANDBY, night begins, update no longer
+    // available) or scr_update_prompt.c clears it directly on a deliberate
+    // user action. Mirrors s_ui_night's edge-triggered commit pattern (only
+    // touched on an actual change), but the edge it tracks is now "just
+    // woke", not "gate table still holds" -- the earlier continuous
+    // re-evaluation was the mid-reach-withdrawal bug this rework fixed (a
+    // touch resets idle time, which used to be one of the gates).
     // nav_policy routes to SCR_UPDATE_PROMPT exactly when this is true (and
     // the dial face is what's showing -- see nav_policy's own comment for
     // why it's scoped to SCR_DIAL). Cleared immediately by
@@ -415,6 +562,21 @@ static inline bool dial_state_is_dual(const app_state_t *st)
 static inline zone_idx_t dial_state_primary_zone(const app_state_t *st)
 {
     return (!st->zone_present[ZONE_A] && st->zone_present[ZONE_B]) ? ZONE_B : ZONE_A;
+}
+
+// Effective ABSOLUTE-mode temperature range: the device's own reported rails
+// once discovery has found them, else the DIAL_TEMP_MIN_F/MAX_F fallback
+// (see app_state_t.temp_min_f/temp_max_f's comment). Every absolute-mode
+// consumer (scr_dial.c's arc range, knob clamp, drag clamp) reads the range
+// through these two, never the macros or the raw fields directly, so there
+// is exactly one place that decides "known vs. fallback".
+static inline int dial_state_temp_min_f(const app_state_t *st)
+{
+    return st->temp_min_f >= 0 ? st->temp_min_f : DIAL_TEMP_MIN_F;
+}
+static inline int dial_state_temp_max_f(const app_state_t *st)
+{
+    return st->temp_max_f >= 0 ? st->temp_max_f : DIAL_TEMP_MAX_F;
 }
 
 // Initialize the store (mutex + defaults). Call once before any other call.
@@ -472,6 +634,17 @@ void dial_state_set_rel_mode(bool rel_mode);
 // same reasoning as ota.status's int mirror.
 void dial_state_set_haptics_level(uint8_t level);
 
+// Optimistic thermal-relief write, callable from the LVGL task the instant a
+// user taps. The worker ALSO commits this before issuing the call, but that
+// is not enough on its own: the worker is single-threaded, so a tap landing
+// while it sits in a slow MCP round-trip (observed at 10-20s) waits in the
+// command queue before anything reaches the screen -- which is exactly the
+// lag the owner reported on cancel. Committing here makes the chip react on
+// the next render regardless of what the worker is busy with; the worker's
+// own commit then reconciles, and reverts if the call fails.
+// zone < 0 applies to every zone (cancel_thermal_relief is device-wide).
+void dial_state_set_relief_optimistic(int zone, bool active, bool heat, int64_t end_ms);
+
 // Day/night backlight brightness preference, 10..100 (percent, 10% steps).
 // Getters always return a value in that range (clamped on read; 100 when no
 // "bri_day"/"bri_night" NVS key has ever been written). Setters clamp too and
@@ -492,6 +665,19 @@ void    dial_state_set_bri_night_pct(uint8_t pct);
 // persisted to NVS "ui"/"bri_nclk".
 uint8_t dial_state_get_bri_night_clock_pct(void);
 void    dial_state_set_bri_night_clock_pct(uint8_t pct);
+
+// Screen (lock/standby) timeout preference, seconds (see app_state_t.
+// screen_timeout_s above for the choice set/default/NVS key). Same
+// clamp-on-read/immediate-commit shape as the brightness pair, except the
+// clamp snaps an out-of-range/corrupt stored value to 90 (today's legacy
+// behavior), not to the nearest UI choice — a corrupt byte should fail back
+// to the ORIGINAL fixed threshold, not to whatever choice happens to be
+// numerically closest. The setter does NOT itself call into dial_power —
+// power_task reads this getter fresh every 100ms tick (same as the
+// brightness pair), so a change reaches the standby/dim decision within one
+// tick with no separate "changed" hook required; see dial_power.c.
+uint16_t dial_state_get_screen_timeout_s(void);
+void     dial_state_set_screen_timeout_s(uint16_t seconds);
 
 // Beta OTA channel preference (see app_state_t.beta above). Same
 // getter+setter shape as the brightness pair; setter persists immediately to
@@ -549,10 +735,7 @@ typedef enum {
                        // so a worker that re-derived !current would undo it.
     CMD_BOOST_START,   // zone + a=heat?1:0 + b=minutes
     CMD_BOOST_CANCEL,  // zone ignored — cancels relief on every zone
-    CMD_BED_OFF,       // zone ignored — both zones off, atomically
     CMD_AWAY,          // a=1 away / 0 home
-    CMD_MATCH_PARTNER, // zone = mine; worker reads the store at execution
-                       // time and set_zones the OTHER zone to my (temp_c, on)
 
     // Settings (M4) destructive actions — each erases some NVS state and
     // reboots. Handled in main.c's handle_immediate_cmd like the others

@@ -157,16 +157,26 @@ itself:
 
 - **Knob:** turn to adjust the target temperature on the dial screen; turn on
   other screens (menus, network/password pickers) to move focus or dial in a
-  value. Detents give a haptic tick; hitting the end of a range gives a
-  distinct stop pulse.
-- **Touch:** tap the power glyph on the dial screen to turn that side on/off.
-  Swipe left/right to move between your side, your partner's side, and the
-  menu. Swipe right on any menu sub-screen (or tap its "Back" row) returns to
-  the menu. A long-press on the dial screen opens quick actions (bed off,
-  boost heat/cool, etc.).
-- **Menu → Settings:** temperature scale (Absolute °F/°C, or Orion's −10…+10
-  relative levels), units (°C/°F, used for the absolute readouts), screen
-  rotation, haptics on/off, and two
+  value. Turning is deliberately silent — the encoder's own mechanical
+  detents are the feedback — but hitting the end of a range gives a distinct
+  stop pulse.
+- **Touch:** tap the power button on the dial screen to turn that side on/off;
+  long-press it to open the Schedule/Hold picker. Tap the snowflake or flame
+  icon sitting at either end of the temperature arc to start a timed boost
+  (cool or heat). Tap the status pill above the power button — it reads
+  "Holding" or "Until H:MM" depending on whether your last change rides until
+  you touch it again or only until the schedule's next step — to jump straight
+  to that same Schedule/Hold picker; while a boost is running it instead shows
+  that boost's end time and an ✕ that cancels it. Swipe left/right to move
+  between your side, your partner's side, and the menu. Swipe right on any
+  menu sub-screen (or tap its "Back" row) returns to the menu.
+- **Menu → Settings:** adjustment mode (Schedule/Hold — the default for what a
+  dial-side change does), **Brightness** (its own sub-screen: separate Day,
+  Night, and Night clock levels, each a full-screen 0–100% picker you can drag
+  or turn), screen timeout (5s/15s/30s/1m before the standby clock takes over),
+  temperature scale (Absolute °F/°C, or Orion's −10…+10 relative levels), units
+  (°C/°F, used for the absolute readouts), haptics (Off / Low / High / Auto —
+  Auto is High by day and Low at night), screen rotation, Away mode, and two
   destructive actions guarded by a tap-twice-within-3-seconds confirm
   ("Tap again to confirm"): **Re-link Orion** (forgets the stored Orion
   tokens and restarts into the link step) and **Factory reset** (erases all
@@ -175,17 +185,28 @@ itself:
   network** — a full confirmation screen (not tap-twice) since it reboots the
   dial straight into Wi-Fi setup, dropping the current network in the
   process.
-- **Menu → About:** firmware version, IDF version, device serial, and
-  **Software update** — see OTA below.
+- **Menu → Update:** the one place update behavior lives — the installed
+  version, **Check for updates** (tap to check, tap-twice to install),
+  **Auto-update** (Off / Overnight), **Skip this version** while one is
+  pending, and **Beta builds**. The menu row itself carries a dot and the
+  pending version number whenever an update is waiting.
+- **Menu → About:** firmware version, IDF version, and device serial.
 - **OTA updates:** however the dial got its first flash — browser or
-  USB — everything after that arrives OTA. The dial periodically checks
-  this repo's GitHub releases for a newer firmware build (a `dial-vX.Y.Z`
-  tag with an `orion-dial.bin` asset — releases also carry an
-  `orion-dial-merged.bin` full-flash image, but that's for reflashing from
-  scratch, not for OTA; see Build & flash above). It only ever *checks* on
-  its own; installing always needs a tap-twice confirm on the About screen's
-  Software update row. The currently running version is shown there and on
-  About's Firmware row.
+  USB — everything after that arrives OTA. The dial checks this repo's GitHub
+  releases every 6 hours for a newer firmware build (a `dial-vX.Y.Z` tag with
+  an `orion-dial.bin` asset — releases also carry an `orion-dial-merged.bin`
+  full-flash image, but that's for reflashing from scratch, not for OTA; see
+  Build & flash above). Turning on **Beta builds** makes it consider
+  prereleases too.
+
+  When one is found you get an "Update available" line on the dial and
+  standby faces, and — at most once a day, only when you wake the screen, and
+  never during your sleep window — a sheet offering to install it right then.
+  Nothing installs without a tap unless you turn **Auto-update** on, in which
+  case it runs unattended in a quiet window after your scheduled wake time and
+  leaves the screen dark while it does. Every install path is rollback-guarded:
+  if the new firmware doesn't come up and confirm itself, the bootloader
+  reverts to the one that worked.
 
 ## Troubleshooting / FAQ
 
@@ -244,8 +265,8 @@ Implemented and working end-to-end:
 - OAuth 2.1 (Dynamic Client Registration, PKCE, QR-code interactive consent,
   NVS token storage, 401-triggered refresh) against Orion's MCP server.
 - MCP-over-HTTPS device control: reading live zone state, setting
-  temperature/on-off, thermal-relief boost, away mode, "match my side",
-  and the sleep schedule that times overnight temperature writes.
+  temperature/on-off, thermal-relief boost, away mode, and the sleep
+  schedule that times overnight temperature writes.
 - Onboarding flow (welcome splash → Wi-Fi → OAuth link → side pick → dial),
   a menu face with Settings/Wi-Fi/About sub-screens, day/night
   palette, haptics, screen rotation, and single- vs. dual-zone topper

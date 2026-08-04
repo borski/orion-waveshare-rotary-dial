@@ -69,13 +69,35 @@ static const char *TAG = "app";
 #define POLL_CONFIRM_US   2000000    // 2s between the confirm polls after a write
 #define POLL_CONFIRM_N          3    // how many of them before returning to idle cadence
 
+// Thermal-relief ("boost") optimistic window: CMD_BOOST_START/CANCEL commit
+// their guess of relief_active/heat/end/prev BEFORE issuing the MCP call (see
+// handle_immediate_cmd), so the chip reacts on the same tick as the tap
+// instead of after a multi-second (sometimes 10-20s) round trip. The server
+// can be slow to actually reflect a just-issued relief change -- even in the
+// call's OWN response -- so both mut_device_state's poll and mut_relief_ack's
+// own ack keep the optimistic guess alive, via relief_should_preserve_
+// optimistic(), while it's younger than this AND the incoming data disagrees
+// with it. Long enough to outlast a slow ack or the fast post-write confirm-
+// poll cadence (POLL_CONFIRM_US * POLL_CONFIRM_N ~= 6s), short enough that a
+// genuine disagreement (relief actually expired, or was cancelled from
+// elsewhere) still resolves quickly instead of wedging the chip.
+#define RELIEF_OPTIMISTIC_WINDOW_US 9000000
+
 // Sleep schedules (M5) don't change minute to minute — refresh far less
 // often than device state, piggybacked on the same idle poll path.
 #define SCHED_INTERVAL_US (30LL * 60 * 1000000)   // ~30 min
 
 // Auto OTA check (M6): once per uptime-day, and only checks (never applies)
 // — see the gating comment at its call site for the full safe-window rule.
-#define OTA_AUTOCHECK_INTERVAL_US (24LL * 60 * 60 * 1000000)
+// 6h, not 24h (owner asked what it costs to check more often, 2026-08-04).
+// One check is a single GitHub request against a 60/hour per-IP limit, so
+// frequency is free on that side; the only real cost is briefly handing the
+// TLS session over from the MCP client, which is noise a few times a day.
+// The old 24h interval combined with a narrow daytime band meant a release
+// took up to a full day to be noticed — the band, not the interval, was the
+// binding constraint (see the window gate below, now widened to "any time
+// outside the sleep window").
+#define OTA_AUTOCHECK_INTERVAL_US (6LL * 60 * 60 * 1000000)
 
 // OTA_FAILED is not allowed to be terminal (field bug: it used to stay
 // wedged until a manual power cycle) — see dial_ota_clear_stale_failure()'s
@@ -175,8 +197,22 @@ static screen_id_t nav_policy(const app_state_t *st, void **arg)
     // normal screen mid-download. READY_REBOOT (image written + verified,
     // about to restart) stays on the same screen — it's the tail of this
     // same flow, not a new one.
-    if (st->ota.status == OTA_DOWNLOADING || st->ota.status == OTA_READY_REBOOT)
-        return SCR_UPDATING;
+    if (st->ota.status == OTA_DOWNLOADING || st->ota.status == OTA_READY_REBOOT) {
+        // An UNATTENDED install on a sleeping dial stays dark: nobody asked
+        // for it, and lighting a bedside screen for two minutes to narrate an
+        // update nobody is watching is exactly the interruption this
+        // firmware's night handling exists to avoid. If the display is awake
+        // — the user is present, or wakes it mid-install — the takeover still
+        // wins, because a dial that reboots under someone's hands with no
+        // explanation is worse than the interruption.
+        // ...and once it IS showing, it stays for the rest of the install.
+        // Without the ui_router_current() clause an unattended install that a
+        // user woke, looked at, and walked away from would drop back to the
+        // clock face mid-download and then reboot with no explanation.
+        if (!st->ota.unattended || dial_power_level() != DPWR_STANDBY ||
+            ui_router_current() == SCR_UPDATING)
+            return SCR_UPDATING;
+    }
     // Status moved off the takeover's two states while we were still showing
     // it — only OTA_FAILED does this in practice (the stale-tap guard on
     // CMD_OTA_APPLY keeps a race from reaching here any other way). Back to
@@ -227,23 +263,26 @@ static screen_id_t nav_policy(const app_state_t *st, void **arg)
         // through transient outages rather than yanking the user to a status
         // screen mid-interaction.
         if (st->have_state) {
-            // Quick-actions, boost, and settings are transient overlays
-            // reached by a deliberate action; a routine state commit (poll
-            // landing, night-mode flip, ...) must not yank the user back to
-            // the dial mid-flow. Returning the current screen unchanged is a
-            // no-op in ui_router_go (same id + same arg), so this is safe
-            // every tick.
+            // Boost, the Schedule/Hold picker, and settings are transient
+            // overlays reached by a deliberate action; a routine state
+            // commit (poll landing, night-mode flip, ...) must not yank the
+            // user back to the dial mid-flow. Returning the current screen
+            // unchanged is a no-op in ui_router_go (same id + same arg), so
+            // this is safe every tick.
             screen_id_t cur = ui_router_current();
 
-            // Update prompt (docs/SPEC-update-prompt.md): the worker's idle
-            // loop raises ota_prompt_due only while EVERY gate in the spec's
-            // table holds, continuously re-checked (not a one-shot latch --
-            // see that loop's own comment), so the worker itself withdraws
-            // the offer the moment any gate stops holding (the user starts
-            // interacting -- idle time resets below the gate's floor -- the
-            // display dims, the account goes degraded, ...), at which point
-            // this falls through to the normal fallback below and lands back
-            // on SCR_DIAL/SCR_STANDBY same as any other abandoned sub-screen.
+            // Update prompt (docs/SPEC-update-prompt.md, reworked): the
+            // worker raises ota_prompt_due on a WAKE EDGE (STANDBY/DIMMED ->
+            // ACTIVE) when every entry gate holds at that instant, not a
+            // continuously re-evaluated condition -- the earlier design
+            // re-checked its gates every idle tick, so a touch (which resets
+            // idle time) withdrew the sheet mid-reach. The worker itself
+            // still withdraws the offer, but only on one of three explicit
+            // exit checks (display back to STANDBY, night begins, update no
+            // longer available -- see that gate's own "exit" comment), so it
+            // survives being touched. When it does withdraw, this falls
+            // through to the normal fallback below and lands back on
+            // SCR_DIAL/SCR_STANDBY same as any other abandoned sub-screen.
             // ENTRY is scoped to SCR_DIAL specifically -- not Settings/Menu/
             // Wi-Fi/etc. -- so a routine background flag can never yank the
             // user out of a screen they navigated to on purpose (the same
@@ -277,7 +316,7 @@ static screen_id_t nav_policy(const app_state_t *st, void **arg)
             // passive set above): both are Settings sub-screens reached by a
             // deliberate tap, and a routine poll landing mid-choice must not
             // yank the user off either one.
-            if (passive || cur == SCR_QUICK || cur == SCR_BOOST || cur == SCR_SETTINGS ||
+            if (passive || cur == SCR_BOOST || cur == SCR_SETTINGS ||
                 cur == SCR_BRIGHTNESS_MENU || cur == SCR_ADJUST_MODE) return cur;
             // First link on a fresh device: pick a default side before showing
             // the dial (SCR_SIDEPICK). Nothing to pick on a single-zone topper,
@@ -320,6 +359,27 @@ typedef struct {
     int64_t poll_started_us;   // when the get_device_state round-trip began
 } device_snapshot_t;
 
+// Shared by mut_device_state (a poll) and mut_relief_ack (the direct result
+// of the boost call we just issued): true when `keep` -- the zone's
+// currently-committed relief_active/heat/end/prev -- was set optimistically
+// (relief_opt_us != 0) more recently than RELIEF_OPTIMISTIC_WINDOW_US, AND
+// `fresh` -- the incoming poll/ack data -- disagrees with it on the one bit
+// the chip actually renders (relief_active). Disagreeing on anything else
+// (exact end time, say) is not treated as a conflict -- once the two sides
+// agree the zone is (in)active, the incoming data's own end/heat/prev is
+// trusted immediately, no reason to hold those back too. `as_of_us` is
+// passed in (poll_started_us for a poll, a freshly-read "now" for an ack)
+// rather than re-read here, so every zone this call touches agrees on the
+// same instant.
+static bool relief_should_preserve_optimistic(const zone_state_t *keep,
+                                               const zone_state_t *fresh,
+                                               int64_t as_of_us)
+{
+    if (!keep->relief_opt_us) return false;
+    if (as_of_us - keep->relief_opt_us >= RELIEF_OPTIMISTIC_WINDOW_US) return false;
+    return keep->relief_active != fresh->relief_active;
+}
+
 static void mut_device_state(app_state_t *st, void *arg)
 {
     device_snapshot_t *d = arg;
@@ -350,12 +410,41 @@ static void mut_device_state(app_state_t *st, void *arg)
         st->zones[z].sched_phase1_temp_c        = keep.sched_phase1_temp_c;
         st->zones[z].sched_phase2_offset_min    = keep.sched_phase2_offset_min;
         st->zones[z].sched_phase2_temp_c        = keep.sched_phase2_temp_c;
+        // hold_until_min is worker-computed (compute_hold_until_min), not
+        // carried by get_device_state, so it belongs in this preserve list
+        // like every sched_* field above. Without it each ~10s poll zeroed
+        // the field -- and 0 is a LEGAL value (midnight), so the pill read
+        // "Until 12:00" on an idle dial with no active phase at all, which
+        // is exactly what the owner saw. The worker only re-commits on a
+        // CHANGE, so once the poll clobbered it to 0 it stayed there.
+        st->zones[z].hold_until_min             = keep.hold_until_min;
 
         if (predates_input) {                       // see the note above
             st->zones[z].on     = keep.on;
             st->zones[z].temp_c = keep.temp_c;
             strlcpy(st->zones[z].thermal_state, keep.thermal_state,
                     sizeof(st->zones[z].thermal_state));
+        }
+
+        // relief_opt_us is dial-local (see its comment in dial_state.h) and
+        // never carried by get_device_state, so -- like hold_until_min above
+        // -- it must survive the wholesale copy or every poll would zero it
+        // and permanently disable the optimistic-preserve check below.
+        st->zones[z].relief_opt_us = keep.relief_opt_us;
+        if (relief_should_preserve_optimistic(&keep, &d->zones[z], d->poll_started_us)) {
+            // This poll's relief_active hasn't caught up to the boost start/
+            // cancel we just optimistically committed -- keep our guess
+            // (the wholesale copy above already applied the poll's version;
+            // put ours back) rather than let the chip flicker to the stale
+            // answer and then flicker again on the next poll once the server
+            // does catch up.
+            st->zones[z].relief_active      = keep.relief_active;
+            st->zones[z].relief_heat        = keep.relief_heat;
+            st->zones[z].relief_end_ms      = keep.relief_end_ms;
+            st->zones[z].relief_prev_temp_c = keep.relief_prev_temp_c;
+            st->zones[z].relief_prev_on     = keep.relief_prev_on;
+        } else {
+            st->zones[z].relief_opt_us = 0;   // poll agrees, or the window lapsed -- server wins from here
         }
     }
     for (int z = 0; z < ZONE_COUNT; z++) st->zone_present[z] = d->present[z];
@@ -378,7 +467,15 @@ static void mut_device_state(app_state_t *st, void *arg)
             st->ui_temp_f[z] = -1;
 }
 
-typedef struct { char names[ZONE_COUNT][24]; char serial[16]; } device_identity_t;
+// temp_min_f/temp_max_f: -1 = temperature_range wasn't present/numeric this
+// discovery (see orion_discover_device()) -- mut_identity below leaves the
+// store's existing value alone then, rather than clobbering a previously
+// good range with "unknown".
+typedef struct {
+    char names[ZONE_COUNT][24];
+    char serial[16];
+    int  temp_min_f, temp_max_f;
+} device_identity_t;
 
 static void mut_identity(app_state_t *st, void *arg)
 {
@@ -386,6 +483,13 @@ static void mut_identity(app_state_t *st, void *arg)
     for (int z = 0; z < ZONE_COUNT; z++)
         strlcpy(st->zones[z].user_name, n->names[z], sizeof(st->zones[z].user_name));
     strlcpy(st->serial, n->serial, sizeof(st->serial));
+    // Device-reported absolute temperature range (owner: "use the Orion
+    // reported min/max for limits, not our own") -- see app_state_t.temp_min_f's
+    // comment for what reads this and the DIAL_TEMP_MIN_F/MAX_F fallback.
+    if (n->temp_min_f >= 0 && n->temp_max_f >= 0) {
+        st->temp_min_f = n->temp_min_f;
+        st->temp_max_f = n->temp_max_f;
+    }
 }
 
 /*
@@ -432,47 +536,73 @@ typedef struct {
 // (temp/on/relief) directly, not gated by poll_started_us — unlike
 // mut_device_state this isn't a background poll racing user input, it's the
 // direct result of a command the user just issued. Deliberately leaves
-// ui_temp_f alone (these commands come from SCR_QUICK/SCR_BOOST, never from a
-// knob turn on the dial, so there's normally no optimistic temp in flight for
-// this zone to clobber or preserve).
+// ui_temp_f alone (these commands come from the dial face's boost buttons /
+// SCR_BOOST, never from a knob turn on the dial, so there's normally no
+// optimistic temp in flight for this zone to clobber or preserve).
+//
+// This IS normally the authoritative settling point for the optimistic guess
+// handle_immediate_cmd commits before issuing the call — CMD_BOOST_START/
+// CANCEL only need the guess to survive until this ack lands. But the owner
+// has observed the server take a beat to actually reflect a just-issued
+// relief change, sometimes even in this call's OWN response — an ack that
+// arrives saying "not active yet" would otherwise stomp the correct
+// optimistic state right back out. So this is gated by the same
+// relief_should_preserve_optimistic() check as mut_device_state's poll: if
+// the response disagrees with a still-fresh optimistic guess, keep the guess
+// (still apply temp/on — this ack IS the authoritative answer for those) and
+// let a later poll or a retried ack settle it; only once they agree (or the
+// window lapses) does the ack's own relief_* win and retire the guess.
 static void mut_relief_ack(app_state_t *st, void *arg)
 {
     relief_ack_t *r = arg;
+    int64_t now_us = esp_timer_get_time();
     for (int z = 0; z < ZONE_COUNT; z++) {
         if (!r->touched[z]) continue;
-        st->zones[z].temp_c            = r->zones[z].temp_c;
-        st->zones[z].on                = r->zones[z].on;
-        st->zones[z].relief_active     = r->zones[z].relief_active;
-        st->zones[z].relief_heat       = r->zones[z].relief_heat;
-        st->zones[z].relief_end_ms     = r->zones[z].relief_end_ms;
+        zone_state_t keep = st->zones[z];
+        st->zones[z].temp_c = r->zones[z].temp_c;
+        st->zones[z].on     = r->zones[z].on;
+        if (relief_should_preserve_optimistic(&keep, &r->zones[z], now_us))
+            continue;   // relief_active/heat/end/prev + relief_opt_us stay as they are (the optimistic guess)
+        st->zones[z].relief_active      = r->zones[z].relief_active;
+        st->zones[z].relief_heat        = r->zones[z].relief_heat;
+        st->zones[z].relief_end_ms      = r->zones[z].relief_end_ms;
         st->zones[z].relief_prev_temp_c = r->zones[z].relief_prev_temp_c;
+        st->zones[z].relief_opt_us      = 0;   // ack agrees — server wins from here
     }
 }
 
-static void mut_bed_off(app_state_t *st, void *arg)
+// Optimistic relief commit for CMD_BOOST_START/CANCEL (main.c's
+// handle_immediate_cmd) — mirrors dial_state_set_zone_on's "flip it before
+// the round trip" shape for the boost chip instead of the power disc.
+// `optimistic` distinguishes the two callers: true stamps relief_opt_us to
+// esp_timer_get_time() (a guess made ahead of the call, which
+// mut_device_state/mut_relief_ack must protect for a while — see
+// RELIEF_OPTIMISTIC_WINDOW_US); false is a revert-on-failure back to the
+// pre-tap truth, which needs no protecting (it isn't a guess, and stamping it
+// would only block the very next poll from correcting a genuinely stale
+// revert).
+typedef struct {
+    zone_idx_t zone;
+    bool    active;
+    bool    heat;
+    int64_t end_ms;
+    float   prev_temp_c;
+    bool    optimistic;
+} relief_optimistic_t;
+
+static void mut_relief_optimistic(app_state_t *st, void *arg)
 {
-    (void)arg;
-    for (int z = 0; z < ZONE_COUNT; z++) {
-        st->zones[z].on = false;                   // optimistic
-        dial_state_predict_thermal(st, (zone_idx_t)z);
-    }
+    relief_optimistic_t *o = arg;
+    zone_state_t *zs = &st->zones[o->zone];
+    zs->relief_active      = o->active;
+    zs->relief_heat        = o->heat;
+    zs->relief_end_ms      = o->end_ms;
+    zs->relief_prev_temp_c = o->prev_temp_c;
+    zs->relief_opt_us      = o->optimistic ? esp_timer_get_time() : 0;
 }
+
 
 static void mut_away(app_state_t *st, void *arg) { st->away = *(bool *)arg; }
-
-// "Match my side" (M5): the worker reads the source zone's CURRENT store
-// values at command-execution time (handle_immediate_cmd), not whatever was
-// true when the sheet was opened, then set_zones the other zone to match —
-// this commit just mirrors that same (temp_c, on) pair into the store.
-typedef struct { zone_idx_t other; float temp_c; bool on; } match_args_t;
-static void mut_match_partner(app_state_t *st, void *arg)
-{
-    match_args_t *m = arg;
-    st->zones[m->other].temp_c = m->temp_c;
-    st->zones[m->other].on     = m->on;
-    st->ui_temp_f[m->other]    = -1;
-    dial_state_predict_thermal(st, m->other);
-}
 
 // Tonight schedule (M5) snapshot from get_sleep_schedules — TODAY's entry
 // only, one per zone (via the worker's uuid map, see s_zone_uuid below).
@@ -542,7 +672,12 @@ typedef enum {
 
 #define SLEEP_PHASE_WAKE_GRACE_MIN 30
 
-static sleep_phase_t sleep_phase_now(const zone_state_t *z, int now_min)
+// `out_boundary_since` (nullable): when a phase IS active, receives the
+// clock-minutes-from-midnight at which it hands off to the next one — the
+// dial's status pill (§3, scr_dial.c) reads this as "Until H:MM" via
+// compute_hold_until_min() below. NULL for callers (temp_write_phase) that
+// only care which field to override, not when it expires.
+static sleep_phase_t sleep_phase_now(const zone_state_t *z, int now_min, int *out_boundary_since)
 {
     if (!z->sched_valid || !z->sched_smart_temp_active) return SLEEP_PHASE_NONE;
     int bed_min, wake_min;
@@ -562,11 +697,17 @@ static sleep_phase_t sleep_phase_now(const zone_state_t *z, int now_min)
     if (p1 > wake_since) p1 = wake_since;
     if (p2 > wake_since) p2 = wake_since;
 
-    if (since < p1)          return SLEEP_PHASE_BEDTIME;
-    if (since < p2)          return SLEEP_PHASE_1;
-    if (since < wake_since)  return SLEEP_PHASE_2;
-    if (since < wake_since + SLEEP_PHASE_WAKE_GRACE_MIN) return SLEEP_PHASE_WAKEUP;
-    return SLEEP_PHASE_NONE;
+    sleep_phase_t phase;
+    int boundary_since;   // minutes-since-bedtime the ACTIVE phase hands off at
+    if (since < p1)                                       { phase = SLEEP_PHASE_BEDTIME; boundary_since = p1; }
+    else if (since < p2)                                  { phase = SLEEP_PHASE_1;       boundary_since = p2; }
+    else if (since < wake_since)                          { phase = SLEEP_PHASE_2;       boundary_since = wake_since; }
+    else if (since < wake_since + SLEEP_PHASE_WAKE_GRACE_MIN)
+                                                           { phase = SLEEP_PHASE_WAKEUP;  boundary_since = wake_since + SLEEP_PHASE_WAKE_GRACE_MIN; }
+    else return SLEEP_PHASE_NONE;
+
+    if (out_boundary_since) *out_boundary_since = ((bed_min + boundary_since) % 1440 + 1440) % 1440;
+    return phase;
 }
 
 // The exact get_sleep_schedules/override_sleep_schedule_tonight field name
@@ -582,6 +723,15 @@ static const char *sleep_phase_field(sleep_phase_t p)
     case SLEEP_PHASE_WAKEUP:  return "wakeup_temp";
     default:                  return NULL;
     }
+}
+
+// Commits one zone's compute_hold_until_min() result (§3) into the store —
+// see zone_state_t.hold_until_min's own comment for what it drives.
+typedef struct { zone_idx_t zone; int16_t hold_until_min; } hold_until_t;
+static void mut_hold_until(app_state_t *st, void *arg)
+{
+    hold_until_t *u = arg;
+    st->zones[u->zone].hold_until_min = u->hold_until_min;
 }
 
 static void mut_oauth_url(app_state_t *st, void *arg) { strlcpy(st->oauth_url, arg, sizeof(st->oauth_url)); }
@@ -612,11 +762,14 @@ static void commit_ota_snapshot(void)
 }
 
 // Update prompt (docs/SPEC-update-prompt.md). The worker RAISES
-// ota_prompt_due (via this mutator, see the idle loop's evaluation below);
-// scr_update_prompt.c LOWERS it directly (dial_state_clear_ota_prompt_due)
-// the instant the user acts — the same asymmetric set/clear split this file
-// already uses for fresh_device (set here) / welcomed (cleared by
-// scr_welcome.c).
+// ota_prompt_due on a wake edge (via this mutator, see the "Update prompt:
+// entry" gate below) and LOWERS it itself on one of three exit conditions
+// (see "Update prompt: exit", same use site); scr_update_prompt.c also
+// LOWERS it directly (dial_state_clear_ota_prompt_due) the instant the user
+// acts — the same asymmetric set/clear split this file already uses for
+// fresh_device (set here) / welcomed (cleared by scr_welcome.c).
+static void mut_ota_unattended(app_state_t *st, void *arg) { st->ota.unattended = *(bool *)arg; }
+
 static void mut_ota_prompt_due(app_state_t *st, void *arg) { st->ota_prompt_due = *(bool *)arg; }
 
 // Auto-update two-strikes tracking (spec): worker-only, deliberately NOT
@@ -636,12 +789,26 @@ static int  s_ota_auto_fail_count;
 // without this, a failed attempt would retry every ~300ms for the rest of
 // the ~2h window instead of "the next day" (spec).
 static bool s_ota_auto_attempted;
-// Live "should the prompt sheet be showing right now" gate result, mirrored
-// into app_state_t.ota_prompt_due only on a false<->true transition — same
+// Live "is the prompt sheet currently raised" flag, mirrored into
+// app_state_t.ota_prompt_due only on a false<->true transition — same
 // edge-triggered shape as s_ui_night/s_ui_clock_valid below, so a tick where
-// nothing changed doesn't bump the generation (and re-render everything)
-// for no reason.
+// nothing changed doesn't bump the generation (and re-render everything) for
+// no reason. Unlike the shipped v1.0-1.2 design, this is no longer a live
+// re-evaluation of a gate table: it's set true exactly once per wake (see
+// s_ota_prev_pwr_level below) and only ever cleared by the three explicit
+// exit checks (or by scr_update_prompt.c itself, on a deliberate user
+// action) — see the "Update prompt: entry" / "Update prompt: exit" comments
+// at this flag's use site for the full story.
 static bool s_ota_prompt_live;
+
+// dial_power_level() as of the PREVIOUS idle tick, sampled every tick
+// regardless of clock validity — the wake-edge gate below needs a
+// STANDBY/DIMMED -> ACTIVE transition, which a level re-read at a single
+// instant can't tell from "has been ACTIVE the whole time". Seeded ACTIVE
+// (the real boot-time level, dial_power.c) so the very first tick can never
+// look like a wake — the spec explicitly wants the prompt to never raise on
+// the initial boot transition, only on an OBSERVED prior standby.
+static dial_power_level_t s_ota_prev_pwr_level = DPWR_ACTIVE;
 
 // OTA rollback health check (M6): dial_ota_mark_valid_if_pending() is
 // idempotent, but there's nothing left to confirm after the first success —
@@ -704,6 +871,14 @@ static bool s_ui_night;
 // s_ui_night's pattern, so the commit only fires on an actual transition.
 static bool s_ui_clock_valid;
 
+// Per-zone hold_until_min actually committed to the store (§3's pill),
+// mirroring s_ui_night's edge-triggered shape so a tick where neither zone's
+// value moved doesn't bump the generation for no reason. -2 (not a legal
+// minutes-from-midnight value, nor -1's "Holding") so the very first idle
+// tick always commits the real answer instead of assuming it agrees with
+// dial_state_init()'s -1 default.
+static int16_t s_ui_hold_until[ZONE_COUNT] = { -2, -2 };
+
 /* ---- Orion MCP calls (worker task only) -------------------------------- */
 
 static char s_serial[16];
@@ -740,10 +915,12 @@ static void parse_thermal_relief(cJSON *zone_obj, zone_state_t *zs)
     cJSON *type = cJSON_GetObjectItem(relief, "type");
     cJSON *end  = cJSON_GetObjectItem(relief, "end_time");
     cJSON *prev = cJSON_GetObjectItem(relief, "previous_temp");
+    cJSON *prev_on = cJSON_GetObjectItem(relief, "previous_on");
     zs->relief_active       = true;
     zs->relief_heat         = (type && type->valuestring && !strcmp(type->valuestring, "heat"));
     zs->relief_end_ms       = cJSON_IsNumber(end) ? (int64_t)end->valuedouble : 0;
     zs->relief_prev_temp_c  = cJSON_IsNumber(prev) ? (float)prev->valuedouble : zs->temp_c;
+    zs->relief_prev_on      = cJSON_IsBool(prev_on) ? cJSON_IsTrue(prev_on) : zs->on;
 }
 
 // Parser for start_thermal_relief / cancel_thermal_relief responses (shape:
@@ -868,7 +1045,25 @@ static sleep_phase_t temp_write_phase(const app_state_t *st, zone_idx_t zone)
     if (!s_zone_uuid[zone][0]) return SLEEP_PHASE_NONE;
     struct tm lt;
     if (!dial_time_now(&lt)) return SLEEP_PHASE_NONE;   // no real wall clock yet -- don't guess
-    return sleep_phase_now(&st->zones[zone], lt.tm_hour * 60 + lt.tm_min);
+    return sleep_phase_now(&st->zones[zone], lt.tm_hour * 60 + lt.tm_min, NULL);
+}
+
+// UI mirror of temp_write_phase() (§3, scr_dial.c's status pill): the exact
+// same four preconditions (Follow schedule, a captured uuid for THIS zone, a
+// real clock, an active phase right now), so the pill reports the WRITE
+// PATH'S BEHAVIOUR rather than just echoing the Adjustment-mode preference —
+// Schedule mode with no active phase still falls back to a plain hold, and
+// this must say so too. -1 = "Holding"; otherwise the active phase's own end
+// boundary, in clock-minutes-from-midnight, for the pill's "Until H:MM".
+// `now_min` is passed in (not re-read via dial_time_now) so every zone this
+// tick agrees on exactly the same "now" the caller's night-window calc used.
+static int16_t compute_hold_until_min(const app_state_t *st, zone_idx_t zone, int now_min)
+{
+    if (!st->sched_follow) return -1;
+    if (!s_zone_uuid[zone][0]) return -1;
+    int boundary_min;
+    sleep_phase_t phase = sleep_phase_now(&st->zones[zone], now_min, &boundary_min);
+    return (phase == SLEEP_PHASE_NONE) ? -1 : (int16_t)boundary_min;
 }
 
 typedef struct {
@@ -955,31 +1150,6 @@ static bool orion_boost_cancel(void *arg)
     return ok;
 }
 
-// set_zones is atomic across zones — used here so "Bed off" can never leave
-// the bed with one side on and one off from a partial failure.
-static bool orion_bed_off(void *arg)
-{
-    (void)arg;
-    // Only name zones this topper actually has — a single-zone device would
-    // reject (or silently ignore) a set_zones carrying a zone_b it doesn't own.
-    app_state_t st;
-    dial_state_get(&st);
-    char zones[96] = "";
-    for (int z = 0; z < ZONE_COUNT; z++) {
-        if (!st.zone_present[z]) continue;
-        char one[48];
-        snprintf(one, sizeof(one), "%s{\"id\":\"%s\",\"on\":false}",
-                 zones[0] ? "," : "", zone_id_str((zone_idx_t)z));
-        strlcat(zones, one, sizeof(zones));
-    }
-    char args[160];
-    snprintf(args, sizeof(args), "{\"serial\":\"%s\",\"zones\":[%s]}", s_serial, zones);
-    char *r = NULL;
-    bool ok = dial_mcp_call_tool("set_zones", args, &r);
-    if (!ok) ESP_LOGW(TAG, "set_zones (bed off) failed: %s", dial_mcp_last_error());
-    free(r);
-    return ok;
-}
 
 typedef struct { bool away; } away_args_t;
 static bool orion_set_away(void *arg)
@@ -1024,6 +1194,7 @@ static bool orion_discover_device(void)
             dial_time_set_iana_tz(tz->valuestring);
 
         device_identity_t ident = { 0 };
+        ident.temp_min_f = ident.temp_max_f = -1;   // set below only if temperature_range parses
         strlcpy(ident.serial, s_serial, sizeof(ident.serial));
         cJSON *zn;
         cJSON_ArrayForEach(zn, cJSON_GetObjectItem(dev0, "zones")) {
@@ -1075,6 +1246,13 @@ static bool orion_discover_device(void)
             ESP_LOGW(TAG, "list_devices has no temperature_scale.relative -- "
                           "relative mode uses the compiled fallback table");
         }
+        // Device-reported ABSOLUTE range (owner: use Orion's own min/max, not
+        // a hardcoded guess) -- captured into ident.temp_min_f/max_f below,
+        // committed via mut_identity, and read everywhere absolute mode needs
+        // it through dial_state_temp_min_f()/_max_f() (dial_state.h). The
+        // lo/hi != DIAL_REL_MIN_F/MAX_F check right after is a SEPARATE
+        // concern (unchanged): it's the relative-scale tripwire validating
+        // the compiled DIAL_REL_F/DIAL_REL_LO_F level table, not this range.
         cJSON *range = cJSON_GetObjectItem(dev0, "temperature_range");
         if (range) {
             cJSON *mn = cJSON_GetObjectItem(range, "min");
@@ -1082,6 +1260,8 @@ static bool orion_discover_device(void)
             if (cJSON_IsNumber(mn) && cJSON_IsNumber(mx)) {
                 int lo = dial_c_to_f((float)mn->valuedouble);
                 int hi = dial_c_to_f((float)mx->valuedouble);
+                ident.temp_min_f = lo;
+                ident.temp_max_f = hi;
                 if (lo != DIAL_REL_MIN_F || hi != DIAL_REL_MAX_F)
                     ESP_LOGE(TAG, "temperature_range %.0f-%.0f C = %d-%d F != relative rails %d-%d F",
                              mn->valuedouble, mx->valuedouble, lo, hi, DIAL_REL_MIN_F, DIAL_REL_MAX_F);
@@ -1091,23 +1271,6 @@ static bool orion_discover_device(void)
         if (ok) dial_state_commit(mut_identity, &ident);
     }
     cJSON_Delete(root);
-    return ok;
-}
-
-// "Match my side" (M5): set_zones the OTHER zone to (temp_c, on) — atomic so
-// the partner's side can never land with the temp changed but the power
-// state not (or vice versa) from a partial failure.
-static bool orion_match_partner(void *arg)
-{
-    match_args_t *m = arg;
-    char args[192];
-    snprintf(args, sizeof(args),
-             "{\"serial\":\"%s\",\"zones\":[{\"id\":\"%s\",\"temp\":%.1f,\"on\":%s}]}",
-             s_serial, zone_id_str(m->other), m->temp_c, m->on ? "true" : "false");
-    char *r = NULL;
-    bool ok = dial_mcp_call_tool("set_zones", args, &r);
-    if (!ok) ESP_LOGW(TAG, "set_zones (match partner) failed: %s", dial_mcp_last_error());
-    free(r);
     return ok;
 }
 
@@ -1255,43 +1418,90 @@ static void ota_progress_cb(int pct)
     commit_ota_snapshot();
 }
 
-// CMD_BOOST_START/CANCEL, CMD_BED_OFF and CMD_AWAY are rare (a quick-actions
-// tap, not a knob spin) — no coalescing, just run them in arrival order.
+// CMD_BOOST_START/CANCEL and CMD_AWAY are rare (a deliberate
+// tap on a boost icon/pill/settings row, not a knob spin) — no coalescing,
+// just run them in arrival order.
 static void handle_immediate_cmd(const app_cmd_t *cmd, const oauth_disc_t *disc,
                                   const char *client_id)
 {
     switch (cmd->kind) {
     case CMD_BOOST_START: {
+        dial_power_inhibit(DPWR_INHIBIT_TASK, true);
         boost_args_t b = { cmd->zone, cmd->a != 0, cmd->b };
-        with_auth_retry(orion_boost, &b, disc, client_id);   // commits inside on success
+
+        // Optimistic (owner-reported: boost was the one control that didn't
+        // react until the whole MCP round trip landed, sometimes 10-20s) —
+        // commit the requested relief state BEFORE issuing the call, exactly
+        // like dial_state_set_zone_on does for the power disc, so the chip
+        // (and SCR_BOOST's hand-off back to the dial face) shows the
+        // countdown on this same tick. end_ms uses the wall clock (time(),
+        // matching how scr_dial.c's pill computes remain_ms), not
+        // esp_timer_get_time() — harmless even before clock_valid, since the
+        // pill only renders a countdown once the clock is valid anyway.
+        // mut_relief_ack (inside orion_boost, on success) is the normal
+        // settling point — see RELIEF_OPTIMISTIC_WINDOW_US's comment for how
+        // it and the next poll avoid fighting this guess in the meantime; on
+        // failure below, revert to exactly what was showing before the tap.
+        app_state_t pre;
+        dial_state_get(&pre);
+        relief_optimistic_t opt = {
+            .zone = cmd->zone, .active = true, .heat = b.heat,
+            .end_ms = (int64_t)time(NULL) * 1000 + (int64_t)b.minutes * 60000,
+            .prev_temp_c = pre.zones[cmd->zone].temp_c,
+            .optimistic = true,
+        };
+        dial_state_commit(mut_relief_optimistic, &opt);
+
+        if (!with_auth_retry(orion_boost, &b, disc, client_id)) {
+            relief_optimistic_t revert = {
+                .zone = cmd->zone,
+                .active = pre.zones[cmd->zone].relief_active,
+                .heat = pre.zones[cmd->zone].relief_heat,
+                .end_ms = pre.zones[cmd->zone].relief_end_ms,
+                .prev_temp_c = pre.zones[cmd->zone].relief_prev_temp_c,
+                .optimistic = false,
+            };
+            dial_state_commit(mut_relief_optimistic, &revert);
+        }
+        dial_power_inhibit(DPWR_INHIBIT_TASK, false);
         break;
     }
     case CMD_BOOST_CANCEL:
-        with_auth_retry(orion_boost_cancel, NULL, disc, client_id);  // commits inside
+        dial_power_inhibit(DPWR_INHIBIT_TASK, true); {
+        // Optimistic, mirroring START above — and, like the underlying
+        // cancel_thermal_relief call itself (no zone arg — see cmd_kind_t's
+        // comment), applied to BOTH zones: whichever one actually had relief
+        // running clears now; the other is already inactive, so clearing it
+        // too is a no-op.
+        app_state_t pre;
+        dial_state_get(&pre);
+        for (int z = 0; z < ZONE_COUNT; z++) {
+            relief_optimistic_t opt = { .zone = (zone_idx_t)z, .optimistic = true };
+            dial_state_commit(mut_relief_optimistic, &opt);
+        }
+        if (!with_auth_retry(orion_boost_cancel, NULL, disc, client_id)) {
+            for (int z = 0; z < ZONE_COUNT; z++) {
+                relief_optimistic_t revert = {
+                    .zone = (zone_idx_t)z,
+                    .active = pre.zones[z].relief_active,
+                    .heat = pre.zones[z].relief_heat,
+                    .end_ms = pre.zones[z].relief_end_ms,
+                    .prev_temp_c = pre.zones[z].relief_prev_temp_c,
+                    .optimistic = false,
+                };
+                dial_state_commit(mut_relief_optimistic, &revert);
+            }
+        }
+        dial_power_inhibit(DPWR_INHIBIT_TASK, false);
         break;
-    case CMD_BED_OFF:
-        if (with_auth_retry(orion_bed_off, NULL, disc, client_id))
-            dial_state_commit(mut_bed_off, NULL);
-        break;
+    }
     case CMD_AWAY: {
+        dial_power_inhibit(DPWR_INHIBIT_TASK, true);
         bool away = cmd->a != 0;
         away_args_t a = { away };
         if (with_auth_retry(orion_set_away, &a, disc, client_id))
             dial_state_commit(mut_away, &away);
-        break;
-    }
-    case CMD_MATCH_PARTNER: {
-        // Read the source zone's CURRENT value at execution time (not
-        // whatever was true when the sheet was opened — a burst of knob
-        // turns could have landed in between).
-        app_state_t st;
-        dial_state_get(&st);
-        if (!dial_state_is_dual(&st)) break;   // no partner side to match on a single-zone topper
-        zone_idx_t mine  = cmd->zone;
-        zone_idx_t other = (mine == ZONE_A) ? ZONE_B : ZONE_A;
-        match_args_t m = { other, st.zones[mine].temp_c, st.zones[mine].on };
-        if (with_auth_retry(orion_match_partner, &m, disc, client_id))
-            dial_state_commit(mut_match_partner, &m);
+        dial_power_inhibit(DPWR_INHIBIT_TASK, false);
         break;
     }
     // Settings (M4) destructive actions: each erases some NVS state and
@@ -1322,10 +1532,24 @@ static void handle_immediate_cmd(const app_cmd_t *cmd, const oauth_disc_t *disc,
     case CMD_OTA_CHECK: {
         app_state_t st;
         dial_state_get(&st);
+        // A MANUAL check re-arms the prompt: tapping "Check for updates" is a
+        // user saying they care about updates right now, which outranks an
+        // earlier "Later" (23h defer) or the once-a-day shown ceiling. Without
+        // this there is no way back to the prompt short of waiting out the
+        // timers — the owner lost it for a day to an accidental dismissal and
+        // had no way to summon it again. The background check deliberately
+        // does NOT do this; only a deliberate tap.
+        dial_state_set_ota_defer(0);
+        dial_state_set_ota_shown(0);
         // One TLS session at a time (see dial_mcp_release_connection): the
         // OTA client is about to open its own connection to GitHub, and a
         // second concurrent session fails its handshake on this build.
         dial_mcp_release_connection();
+        // Hold the screen for the duration: the user tapped this and is
+        // waiting on the answer. Released in the same handler below, which
+        // restarts the idle clock so the result is readable even on a 5s
+        // timeout.
+        dial_power_inhibit(DPWR_INHIBIT_TASK, true);
         if (st.clock_valid) {
             // Show "Checking..." for the duration of the call instead of
             // flicking straight to the answer -- a tap with no visible
@@ -1336,15 +1560,24 @@ static void handle_immediate_cmd(const app_cmd_t *cmd, const oauth_disc_t *disc,
         }
         else dial_ota_set_blocked("waiting for time sync - try again shortly");
         commit_ota_snapshot();
+        dial_power_inhibit(DPWR_INHIBIT_TASK, false);
         break;
     }
     case CMD_OTA_APPLY: {
+        // Held from the tap, not from the moment DOWNLOADING is published:
+        // esp_https_ota_begin can take seconds (and retries once), and until
+        // status flips, nav_policy hasn't yet forced the SCR_UPDATING screen
+        // whose own inhibit would cover this.
+        dial_power_inhibit(DPWR_INHIBIT_TASK, true);
         // Stale-tap guard: the row's confirm is only armed while AVAILABLE,
         // but the store could have moved on (an unrelated auto-check landed,
         // say) between the tap and the worker draining this command.
         app_state_t st;
         dial_state_get(&st);
-        if (st.ota.status != OTA_AVAILABLE) break;
+        if (st.ota.status != OTA_AVAILABLE) {
+            dial_power_inhibit(DPWR_INHIBIT_TASK, false);   // early out must not leak the hold
+            break;
+        }
         // This command only ever arrives from a deliberate, confirmed user
         // tap (scr_update.c's tap-twice, or scr_update_prompt.c's "Update
         // now") — never from the unattended overnight path below, which
@@ -1361,12 +1594,15 @@ static void handle_immediate_cmd(const app_cmd_t *cmd, const oauth_disc_t *disc,
         // with either of ours for memory (see dial_mcp_release_connection).
         dial_mcp_release_connection();
         dial_oauth_release_connection();
+        bool attended = false;
+        dial_state_commit(mut_ota_unattended, &attended);
         bool ok = dial_ota_download_and_apply(ota_progress_cb);
         commit_ota_snapshot();
         if (ok) {
             ESP_LOGI(TAG, "OTA image ready; rebooting into it");
             esp_restart();
         }
+        dial_power_inhibit(DPWR_INHIBIT_TASK, false);
         break;
     }
     // scr_settings.c posts this from destroy() (screen teardown) so a FAILED
@@ -1609,9 +1845,10 @@ static void worker_task(void *arg)
 
             // Coalesce a burst: per zone, at most one net toggle + final temp.
             // A burst mixing in a rare command (above) is vanishingly
-            // unlikely — quick-actions requires its own screen — but if one
-            // lands mid-drain, stop coalescing and handle it right after
-            // rather than silently mis-treating it as a toggle.
+            // unlikely — each one is either a tap on its own settings row or
+            // a trip through its own screen (SCR_BOOST, SCR_SETTINGS) — but
+            // if one lands mid-drain, stop coalescing and handle it right
+            // after rather than silently mis-treating it as a toggle.
             int last_temp[ZONE_COUNT] = { -1, -1 };
             int want_on[ZONE_COUNT]   = { -1, -1 };   // -1 = untouched this burst
             bool have_pending = false;
@@ -1683,6 +1920,20 @@ static void worker_task(void *arg)
             dial_state_commit(mut_clock_valid, &clock_valid);
         }
 
+        // Update-prompt wake edge (docs/SPEC-update-prompt.md rework):
+        // sampled every idle tick regardless of clock validity, so a
+        // STANDBY/DIMMED -> ACTIVE transition is never missed while waiting
+        // on the entry gates below (which do need a valid clock -- see the
+        // "Update prompt: entry" block inside the dial_time_now() branch).
+        // A single dial_power_level() read can't tell "just woke" from
+        // "has been ACTIVE for an hour"; comparing against the previous
+        // tick's level is what makes it an edge instead of a level.
+        dial_power_level_t ota_pwr_level = dial_power_level();
+        bool ota_prompt_woke = (s_ota_prev_pwr_level == DPWR_STANDBY ||
+                                 s_ota_prev_pwr_level == DPWR_DIMMED) &&
+                                ota_pwr_level == DPWR_ACTIVE;
+        s_ota_prev_pwr_level = ota_pwr_level;
+
         // Night mode: warm-dim + quiet haptics while the household sleeps.
         // Real window (M5): bedtime-30min -> wake+30min from ZONE_A's
         // schedule (the dial's own side: override_sleep_schedule_tonight has
@@ -1726,16 +1977,41 @@ static void worker_task(void *arg)
                 dial_state_commit(mut_bump, NULL);
             }
 
-            // ---- Update prompt (docs/SPEC-update-prompt.md) -----------------
-            // Every row of the spec's gate table, live and re-evaluated every
-            // idle tick (~300ms) — committed to app_state_t only on a
-            // false<->true transition (mut_ota_prompt_due, edge-triggered
-            // exactly like s_ui_night above), so the worker itself withdraws
-            // the offer the instant any gate stops holding instead of a
-            // one-shot latch nav_policy would have to separately un-stick.
-            {
-                time_t   now_epoch = time(NULL);
-                int64_t  idle_us   = esp_timer_get_time() - dial_state_last_input_us();
+            // ---- Status pill hold/until (§3, scr_dial.c) ---------------------
+            // Recomputed every idle tick, same cadence as the night-window calc
+            // above and off the same (st, now_min) this tick already has — a
+            // phase boundary crossing, a fresh schedule fetch (mut_schedules,
+            // ~30min cadence), or an Adjustment-mode flip (scr_adjust_mode.c)
+            // all show up within one tick this way, with no separate dirty flag
+            // to wire up. Committed per zone, only on an actual change, same
+            // edge-triggered shape as s_ui_night just above.
+            for (int z = 0; z < ZONE_COUNT; z++) {
+                int16_t hu = compute_hold_until_min(&st, (zone_idx_t)z, now_min);
+                if (hu != s_ui_hold_until[z]) {
+                    s_ui_hold_until[z] = hu;
+                    hold_until_t up = { (zone_idx_t)z, hu };
+                    dial_state_commit(mut_hold_until, &up);
+                }
+            }
+
+            // ---- Update prompt: entry (docs/SPEC-update-prompt.md rework) --
+            // Raised ONLY on the wake edge sampled above (STANDBY/DIMMED ->
+            // ACTIVE), never on the initial boot transition (ota_prompt_woke
+            // can't be true before an observed prior standby -- see
+            // s_ota_prev_pwr_level's seed). The shipped v1.0-1.2 design
+            // re-evaluated an idle-window gate (DPWR_ACTIVE + idle_us in
+            // [10s,30s), the only slice between "settled" and "display about
+            // to dim") continuously, every ~300ms tick: it could only ever
+            // raise the prompt into an empty room (the user had already
+            // walked away by the time idle_us cleared 10s), it consumed the
+            // once-per-24h ota_shown stamp on that same empty-room raise, and
+            // re-checking idle_us on every tick meant a touch (which resets
+            // it) withdrew the sheet mid-reach. A wake edge is the one moment
+            // a human is provably in front of the dial, so it needs no idle
+            // window at all -- just the rest of the spec's gates, checked
+            // once, right then.
+            if (ota_prompt_woke) {
+                time_t now_epoch = time(NULL);
                 bool want_prompt =
                     st.ota.status == OTA_AVAILABLE &&
                     strcmp(st.ota_skip, st.ota.latest) != 0 &&
@@ -1743,18 +2019,41 @@ static void worker_task(void *arg)
                     (st.ota_shown == 0 || (uint32_t)now_epoch - st.ota_shown >= 24 * 3600) &&
                     !night &&
                     st.phase == PH_READY && st.have_state &&
-                    dial_power_level() == DPWR_ACTIVE && idle_us >= 3 * 1000000LL &&
-                    idle_us >= 10 * 1000000LL &&   // no knob detent / pending write recently
                     clock_valid &&
                     st.ota_auto == 0;   // Auto-update Off — if it's on, the dial handles it, don't ask
-                if (want_prompt != s_ota_prompt_live) {
-                    s_ota_prompt_live = want_prompt;
-                    dial_state_commit(mut_ota_prompt_due, &want_prompt);
-                    // Stamp the moment it's actually offered (rising edge
-                    // only) — this is the once-per-24h ceiling's own clock,
-                    // independent of "Later"'s separate ota_defer.
-                    if (want_prompt) dial_state_set_ota_shown((uint32_t)now_epoch);
+                if (want_prompt && !s_ota_prompt_live) {
+                    s_ota_prompt_live = true;
+                    dial_state_commit(mut_ota_prompt_due, &s_ota_prompt_live);
+                    // Once-per-24h ceiling's own clock, independent of
+                    // "Later"'s separate ota_defer — stamped the instant the
+                    // sheet is actually raised, which is now honest: it only
+                    // fires when a human just woke the device and is looking
+                    // at it, not into an empty room.
+                    dial_state_set_ota_shown((uint32_t)now_epoch);
                 }
+            }
+
+            // ---- Update prompt: exit (deliberately separate from the entry
+            // gates above) — once raised, the sheet is sticky (nav_policy
+            // keeps routing to it, scoped to SCR_DIAL/SCR_UPDATE_PROMPT)
+            // until the user acts (scr_update_prompt.c clears the flag
+            // itself on every exit path: Update now / Later / Update
+            // options / swipe-dismiss) or one of these three fires:
+            //   - the display made it all the way back to STANDBY (the user
+            //     walked away without acting)
+            //   - night began
+            //   - the update stopped being available (installed some other
+            //     way, or superseded)
+            // NOT a touch, and NOT a re-run of the entry gates: re-running
+            // them was exactly what let a touch (idle_us resetting below the
+            // old gate's floor) withdraw the sheet mid-reach before this
+            // rework. These three are checked on their own so the sheet
+            // survives being touched — that's the one thing "wake and reach
+            // for the dial" is guaranteed to involve.
+            if (s_ota_prompt_live &&
+                (ota_pwr_level == DPWR_STANDBY || night || st.ota.status != OTA_AVAILABLE)) {
+                s_ota_prompt_live = false;
+                dial_state_commit(mut_ota_prompt_due, &s_ota_prompt_live);
             }
 
             // ---- Auto-update overnight install (docs/SPEC-update-prompt.md) -
@@ -1778,13 +2077,30 @@ static void worker_task(void *arg)
                     ? (now_min >= auto_start && now_min < auto_end)
                     : (now_min >= auto_start || now_min < auto_end);
 
-                bool zones_off = true;
-                for (int z = 0; z < ZONE_COUNT; z++)
-                    if (st.zone_present[z] && st.zones[z].on) zones_off = false;
+                // NOT gated on the zones being off. The dial is a remote
+                // control, not the bed's controller — heating/cooling is
+                // driven by Orion's own hardware and the cloud, and the
+                // dial's ~30s reboot to apply an install has zero effect on
+                // the bed's operation. A zones-off requirement protects
+                // against nothing and permanently starves auto-update for
+                // anyone who runs their topper through the day or whose
+                // schedule keeps it on — silently, forever. Do not
+                // reintroduce it on the assumption it was protecting
+                // something.
+                //
+                // What DOES need protecting is thermal relief ("boost"): a
+                // timed session with a live countdown on screen, genuinely
+                // disruptive to interrupt with the install takeover screen —
+                // mirrors relief_any's own guard on the daily OTA
+                // auto-CHECK below. Relief is temporary by construction, so
+                // unlike zones_off this can never permanently disqualify
+                // anyone.
+                bool relief_any = st.zones[ZONE_A].relief_active ||
+                                   st.zones[ZONE_B].relief_active;
 
                 int64_t auto_idle_us = esp_timer_get_time() - dial_state_last_input_us();
                 bool eligible = in_window && !night && st.phase == PH_READY &&
-                                zones_off && auto_idle_us >= 30LL * 60 * 1000000;
+                                !relief_any && auto_idle_us >= 30LL * 60 * 1000000;
 
                 if (!in_window) {
                     s_ota_auto_attempted = false;   // window closed; re-arm for tomorrow's occurrence
@@ -1804,6 +2120,8 @@ static void worker_task(void *arg)
                         // manual CMD_OTA_APPLY path below.
                         dial_mcp_release_connection();
                         dial_oauth_release_connection();
+                        bool unattended = true;
+                        dial_state_commit(mut_ota_unattended, &unattended);
                         bool ok = dial_ota_download_and_apply(ota_progress_cb);
                         commit_ota_snapshot();
                         if (ok) {
@@ -1918,11 +2236,28 @@ static void worker_task(void *arg)
             // called dial_time_now() mid-condition, so anything computed from
             // ota_lt above it would have read stale/uninitialised fields.
             bool have_local = ota_st.clock_valid && dial_time_now(&ota_lt);
+            // Offset is now minutes past the top of the hour rather than
+            // past 10:00 — with a 6h interval the check can land in any
+            // waking hour, and the jitter's job is unchanged: stop a fleet
+            // that all rebooted together (an OTA does exactly that) from
+            // hitting GitHub in the same minute forever after.
             int window_open_min = 10 * 60 + s_ota_check_offset_min;
             int now_min_local = have_local ? ota_lt.tm_hour * 60 + ota_lt.tm_min : -1;
+            // "Not asleep" is the only real requirement: the daytime band
+            // existed to keep checks away from the sleep window, and `night`
+            // already answers that question directly (bedtime-30 to wake+30
+            // from the actual schedule, not a fixed guess). Keeping the
+            // per-device jitter as a minutes-into-the-hour stagger.
+            (void)window_open_min;
+            // No night gate at all (owner, 2026-08-04): the CHECK is silent
+            // — one HTTPS request, no screen, no sound — so there is nothing
+            // to protect a sleeping household from. What must never appear at
+            // night is the PROMPT, and that has its own !night entry gate, as
+            // does the ambient "Update available" line. Checking around the
+            // clock just means a release published in the evening is known by
+            // morning instead of waiting for the next daylight window.
             bool in_window = have_local &&
-                              now_min_local >= window_open_min &&
-                              ota_lt.tm_hour < 16;
+                              (now_min_local % 60) >= (s_ota_check_offset_min % 60);
             bool relief_any = ota_st.zones[ZONE_A].relief_active ||
                                ota_st.zones[ZONE_B].relief_active;
             if (in_window && !relief_any && ota_st.phase == PH_READY) {

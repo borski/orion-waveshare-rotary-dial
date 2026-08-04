@@ -22,6 +22,12 @@ yourself. The dial talks to Orion directly, over Wi-Fi you already have.
 - **Waveshare ESP32-S3-Knob-Touch-LCD-1.8** — the round 1.8" touch-LCD knob
   board (ESP32-S3, rotary encoder + capacitive touch + haptics). See
   [firmware/README.md](firmware/README.md) for the full parts table.
+  Sold by Waveshare here:
+  [waveshare.com/esp32-s3-knob-touch-lcd-1.8](https://www.waveshare.com/esp32-s3-knob-touch-lcd-1.8.htm?sku=34875)
+  — a third-party store with no connection to this project, linked purely for
+  convenience. Verified to point at the right board on 2026-08-03; product
+  pages move and SKUs get retired, so check the specs on arrival rather than
+  trusting the link.
 - An Orion Sleep dual-zone topper on the same 2.4 GHz Wi-Fi network, and an
   Orion account.
 
@@ -67,17 +73,29 @@ board bring-up notes, and firmware architecture live in
   the spot (Dynamic Client Registration) — no shared secret baked into the
   firmware.
 - **Dual-zone control** with a side picker, so one dial can drive either
-  half of the bed.
+  half of the bed — plus screen rotation, so the same board reads right
+  from either nightstand.
 - **Absolute or relative temperature** — read the setpoint as a real
   temperature (**°F or °C**, your choice) or as an Orion-style **−10…+10
   level**, switchable in settings. Fresh dials default to relative.
-- **Haptic detents** on every knob turn, with a distinct stop pulse at the
-  ends of a range.
-- **Day/night palette** that shifts with the clock, and a **standby clock
-  face** for when it's idle.
-- **OTA updates** straight from this repo's GitHub Releases, with
-  bootloader rollback if one goes bad.
-- **Factory reset** — tap-twice-confirm to unpair and start clean.
+- **Schedule or hold** — a change made on the dial can either ride your
+  Orion schedule (the next scheduled step still happens, matching what the
+  app does) or hold for the rest of the night. A status chip on the dial
+  face says which is in effect, and when it runs out.
+- **Boost heat or cool** from the icons at either end of the temperature
+  arc — a timed push in one direction that returns you to where you were.
+- **Quiet knob, honest haptics** — the encoder's own mechanical detents are
+  the feedback when you turn it; the motor only fires where it tells you
+  something the clicks can't, like hitting the end of a range. Strength is
+  configurable (Off / Low / High / Auto, dimmer at night).
+- **Day/night palette** that shifts with your sleep schedule, and a **standby
+  clock face** for when it's idle — with separate brightness for the day, the
+  night, and the clock itself, plus a configurable screen timeout.
+- **OTA updates** straight from this repo's GitHub Releases, with bootloader
+  rollback if one goes bad, an optional beta channel, and auto-update that
+  installs in the quiet hours after you wake — never while you're asleep.
+- **Away mode**, **re-link**, and a tap-twice **factory reset** in settings,
+  for when you travel, the pairing goes stale, or you want to start clean.
 
 ## Screens
 
@@ -96,29 +114,57 @@ board bring-up notes, and firmware architecture live in
 </tr>
 <tr>
 <td align="center"><img src="docs/screens/sidepick.png" width="170" alt="Side picker screen for dual-zone toppers"></td>
-<td align="center"><img src="docs/screens/dial.png" width="170" alt="The temperature dial"></td>
-<td align="center"><img src="docs/screens/quick.png" width="170" alt="Quick actions screen"></td>
-<td align="center"><img src="docs/screens/boost.png" width="170" alt="Thermal-relief boost screen"></td>
+<td align="center"><img src="docs/screens/dial.png" width="170" alt="The temperature dial showing a setpoint in degrees Fahrenheit"></td>
+<td align="center"><img src="docs/screens/dial-relative.png" width="170" alt="The temperature dial showing an Orion-style relative level instead of a temperature"></td>
+<td align="center"><img src="docs/screens/dial-until.png" width="170" alt="The temperature dial with the status pill showing Until H:MM"></td>
 </tr>
 <tr>
 <td align="center">Pick your side</td>
 <td align="center">The dial</td>
-<td align="center">Quick actions</td>
-<td align="center">Boost</td>
+<td align="center">Relative scale</td>
+<td align="center">Holds until schedule</td>
 </tr>
 <tr>
+<td align="center"><img src="docs/screens/boost.png" width="170" alt="Thermal-relief boost screen"></td>
+<td align="center"><img src="docs/screens/adjust-mode.png" width="170" alt="Adjustment mode screen: schedule or hold"></td>
 <td align="center"><img src="docs/screens/menu.png" width="170" alt="Menu screen"></td>
 <td align="center"><img src="docs/screens/settings.png" width="170" alt="Settings screen"></td>
-<td align="center"><img src="docs/screens/adjust-mode.png" width="170" alt="Adjustment mode screen"></td>
-<td align="center"><img src="docs/screens/standby.png" width="170" alt="Standby clock face"></td>
 </tr>
 <tr>
+<td align="center">Boost</td>
+<td align="center">Adjustment mode</td>
 <td align="center">Menu</td>
 <td align="center">Settings</td>
-<td align="center">Adjustment mode</td>
+</tr>
+<tr>
+<td align="center"><img src="docs/screens/brightness-menu.png" width="170" alt="Brightness menu with separate day, night and night-clock levels"></td>
+<td align="center"><img src="docs/screens/brightness.png" width="170" alt="Full-screen brightness picker"></td>
+<td align="center"><img src="docs/screens/update-prompt.png" width="170" alt="Update prompt offering to install now or later"></td>
+<td align="center"><img src="docs/screens/update.png" width="170" alt="Update screen with auto-update, skip and beta options"></td>
+</tr>
+<tr>
+<td align="center">Brightness</td>
+<td align="center">Setting a level</td>
+<td align="center">Update prompt</td>
+<td align="center">Update options</td>
+</tr>
+<tr>
+<td align="center"><img src="docs/screens/standby.png" width="170" alt="Standby clock face"></td>
+<td align="center"><img src="docs/screens/updating.png" width="170" alt="Install progress screen"></td>
+<td align="center"><img src="docs/screens/wifi-info.png" width="170" alt="Wi-Fi details screen"></td>
+<td align="center"><img src="docs/screens/about.png" width="170" alt="About screen showing firmware version"></td>
+</tr>
+<tr>
 <td align="center">Standby clock</td>
+<td align="center">Installing</td>
+<td align="center">Wi-Fi details</td>
+<td align="center">About</td>
 </tr>
 </table>
+
+The rest — the boost-active dial, the pre-bedtime pause state, the standby
+face carrying an update hint, the night-clock brightness picker — are in
+[`docs/screens/`](docs/screens/).
 
 ### Preview the UI without hardware
 

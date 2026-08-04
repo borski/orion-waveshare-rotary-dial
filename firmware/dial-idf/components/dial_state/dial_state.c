@@ -35,6 +35,22 @@ static inline uint8_t clamp_haptics_level(uint8_t level)
     return (level <= 3) ? level : 1;
 }
 
+// Defends the screen-timeout pref on read/write. A legal stored value is
+// EITHER 90 (the legacy hardcoded threshold this pref defaults to — see
+// app_state_t.screen_timeout_s) OR one of the five values
+// DIAL_SCR_TIMEOUT_CHOICES (dial_state.h) that the Settings row can actually
+// produce. Anything else (corrupt NVS byte, a future firmware's choice this
+// build predates) falls back to 90 — deliberately NOT the nearest choice,
+// which would silently change an already-configured timeout instead of
+// falling back to the one value this build has always understood.
+static inline uint16_t clamp_screen_timeout_s(uint16_t s)
+{
+    if (s == 90) return s;
+    for (int i = 0; i < DIAL_SCR_TIMEOUT_CHOICES_N; i++)
+        if (DIAL_SCR_TIMEOUT_CHOICES[i] == s) return s;
+    return 90;
+}
+
 static SemaphoreHandle_t s_mux;
 static QueueHandle_t     s_cmd_q;
 static app_state_t       s_state;
@@ -69,6 +85,11 @@ void dial_state_init(void)
                                         // — restore_prefs below is what makes an
                                         // UPGRADING device's default something
                                         // other than this plain 100
+    s_state.screen_timeout_s = 90;    // matches the old hardcoded STANDBY_AFTER_US
+                                        // exactly (not one of the five UI choices —
+                                        // see app_state_t.screen_timeout_s), so
+                                        // shipping this pref changes no device's
+                                        // behavior until the user taps the row
     s_state.beta          = false;    // fresh-device default: stable channel only
     s_state.sched_follow  = true;     // fresh-device default: Follow schedule (owner decision)
     s_state.ota_auto      = 0;        // fresh-device default: Off (explicit consent required)
@@ -82,9 +103,15 @@ void dial_state_init(void)
     // apply. An upgrading device overrides this back to absolute in
     // restore_prefs when it finds a pre-existing "zone" key but no "relmode".
     s_state.rel_mode = true;
+    // Device temperature range unknown until orion_discover_device() parses
+    // list_devices' temperature_range -- dial_state_temp_min_f()/_max_f()
+    // fall back to the DIAL_TEMP_MIN_F/MAX_F constants while these are -1.
+    s_state.temp_min_f = -1;
+    s_state.temp_max_f = -1;
     for (int z = 0; z < ZONE_COUNT; z++) {
-        s_state.ui_temp_f[z]       = -1;
-        s_state.zones[z].actual_c  = -1.0f;
+        s_state.ui_temp_f[z]         = -1;
+        s_state.zones[z].actual_c    = -1.0f;
+        s_state.zones[z].hold_until_min = -1;   // "Holding" until the worker's first idle tick says otherwise
     }
 }
 
@@ -124,6 +151,8 @@ void dial_state_restore_prefs(void)
     have_bri_day   = have_bri_day   || old_day;
     have_bri_night = have_bri_night || old_night;
     bool have_bri_nclk  = nvs_get_u8(h, "bri_nclk", &bri_nclk) == ESP_OK;
+    uint16_t scr_to = 90;   // matches init's fresh-device default
+    bool have_scr_to    = nvs_get_u16(h, "scr_to", &scr_to) == ESP_OK;
     bool have_beta      = nvs_get_u8(h, "beta", &beta) == ESP_OK;
     bool have_sched_follow = nvs_get_u8(h, "sched_follow", &sched_follow) == ESP_OK;
     bool have_ota_auto  = nvs_get_u8(h, "ota_auto", &ota_auto) == ESP_OK;
@@ -133,7 +162,7 @@ void dial_state_restore_prefs(void)
     bool have_ota_skip  = nvs_get_str(h, "ota_skip", ota_skip, &ota_skip_sz) == ESP_OK;
     nvs_close(h);
     if (!have_zone && !have_units && !have_haptics && !have_rot && !have_rel
-        && !have_bri_day && !have_bri_night && !have_bri_nclk && !have_beta
+        && !have_bri_day && !have_bri_night && !have_bri_nclk && !have_scr_to && !have_beta
         && !have_sched_follow
         && !have_ota_auto && !have_ota_defer && !have_ota_shown && !have_ota_skip) return;
 
@@ -200,6 +229,7 @@ void dial_state_restore_prefs(void)
         if (old_duty < 4) old_duty = 4;
         s_state.bri_night_clock_pct = (uint8_t)lroundf(100.0f * sqrtf((float)old_duty / 64.0f));
     }
+    if (have_scr_to)     s_state.screen_timeout_s = clamp_screen_timeout_s(scr_to);
     if (have_beta)       s_state.beta         = (beta != 0);
     if (have_sched_follow) s_state.sched_follow = (sched_follow != 0);
     if (have_ota_auto)   s_state.ota_auto  = (ota_auto <= 1) ? ota_auto : 0;
@@ -395,6 +425,37 @@ void dial_state_set_rel_mode(bool rel_mode)
     }
 }
 
+void dial_state_set_relief_optimistic(int zone, bool active, bool heat, int64_t end_ms)
+{
+    xSemaphoreTake(s_mux, portMAX_DELAY);
+    for (int z = 0; z < ZONE_COUNT; z++) {
+        if (zone >= 0 && z != zone) continue;
+        if (active && !s_state.zones[z].relief_active) {
+            // Capture what the boost is about to displace, at the instant it
+            // starts. Without this, relief_prev_on held whatever the last
+            // get_device_state poll left (false on a zone that has never had
+            // relief this boot), and cancelling before the first poll landed
+            // restored that stale value — switching a bed that was ON to OFF.
+            // Doing it here covers BOTH callers, the LVGL task and the worker.
+            s_state.zones[z].relief_prev_on     = s_state.zones[z].on;
+            s_state.zones[z].relief_prev_temp_c = s_state.zones[z].temp_c;
+        }
+        if (!active && s_state.zones[z].relief_active) {
+            // Cancelling restores what the relief displaced. Without this the
+            // zone still looks ON for one render and the chip flashes
+            // "Holding" before settling — exactly what the owner saw.
+            s_state.zones[z].on     = s_state.zones[z].relief_prev_on;
+            s_state.zones[z].temp_c = s_state.zones[z].relief_prev_temp_c;
+        }
+        s_state.zones[z].relief_active  = active;
+        s_state.zones[z].relief_heat    = heat;
+        s_state.zones[z].relief_end_ms  = active ? end_ms : 0;
+        s_state.zones[z].relief_opt_us  = esp_timer_get_time();
+    }
+    s_state.generation++;
+    xSemaphoreGive(s_mux);
+}
+
 void dial_state_set_haptics_level(uint8_t level)
 {
     level = clamp_haptics_level(level);
@@ -482,6 +543,30 @@ void dial_state_set_bri_night_clock_pct(uint8_t pct)
     nvs_handle_t h;
     if (nvs_open(NVS_NS, NVS_READWRITE, &h) == ESP_OK) {
         nvs_set_u8(h, "bri_nclk", pct);
+        nvs_commit(h);
+        nvs_close(h);
+    }
+}
+
+uint16_t dial_state_get_screen_timeout_s(void)
+{
+    xSemaphoreTake(s_mux, portMAX_DELAY);
+    uint16_t v = s_state.screen_timeout_s;
+    xSemaphoreGive(s_mux);
+    return v;
+}
+
+void dial_state_set_screen_timeout_s(uint16_t seconds)
+{
+    seconds = clamp_screen_timeout_s(seconds);
+    xSemaphoreTake(s_mux, portMAX_DELAY);
+    s_state.screen_timeout_s = seconds;
+    s_state.generation++;
+    xSemaphoreGive(s_mux);
+
+    nvs_handle_t h;
+    if (nvs_open(NVS_NS, NVS_READWRITE, &h) == ESP_OK) {
+        nvs_set_u16(h, "scr_to", seconds);
         nvs_commit(h);
         nvs_close(h);
     }

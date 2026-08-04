@@ -51,7 +51,6 @@ set(DIAL_UI_SRCS
   ${DIAL_UI_DIR}/scr_updating.c
   ${DIAL_UI_DIR}/scr_update_prompt.c
   ${DIAL_UI_DIR}/scr_standby.c
-  ${DIAL_UI_DIR}/scr_quick.c
   ${DIAL_UI_DIR}/scr_boost.c
   ${DIAL_UI_DIR}/scr_welcome.c
   ${DIAL_UI_DIR}/scr_sidepick.c
@@ -62,7 +61,8 @@ set(DIAL_UI_SRCS
   ${DIAL_UI_DIR}/dial_palette.c
   ${DIAL_UI_DIR}/dial_list.c
 )
-set(DIAL_UI_FONT_SRC ${DIAL_UI_DIR}/dial_font_num_88.c)
+set(DIAL_UI_FONT_SRC ${DIAL_UI_DIR}/dial_font_num_88.c ${DIAL_UI_DIR}/dial_font_icons_16.c
+    ${DIAL_UI_DIR}/dial_font_icons_20.c)
 
 # lv_font_conv emits a font source that includes "lvgl.h" directly unless
 # told to use the simple include — same fix the real dial_ui/CMakeLists.txt

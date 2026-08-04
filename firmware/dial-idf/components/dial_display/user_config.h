@@ -14,7 +14,14 @@
 // The pixel number in horizontal and vertical
 #define EXAMPLE_LCD_H_RES              360 
 #define EXAMPLE_LCD_V_RES              360
-#define EXAMPLE_LVGL_BUF_HEIGHT        (EXAMPLE_LCD_V_RES / 10) 
+// V_RES/4, not /10 (owner-reported tearing on the big numerals, 2026-08-04).
+// The 88px numeral spans ~2.5 of the old 36-line chunks, so one redraw went
+// out as several separate QSPI transactions while the panel kept scanning —
+// the seam between chunks is the tear. At 90 lines the numeral lands in a
+// single flush. Costs 126KB of internal DMA RAM for the pair instead of
+// 51KB; affordable now that TLS buffers moved to PSRAM
+// (CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC).
+#define EXAMPLE_LVGL_BUF_HEIGHT        (EXAMPLE_LCD_V_RES / 4)
 
 #define EXAMPLE_PIN_NUM_LCD_CS      (gpio_num_t)14
 #define EXAMPLE_PIN_NUM_LCD_PCLK    (gpio_num_t)13

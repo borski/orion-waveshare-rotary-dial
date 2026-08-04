@@ -72,13 +72,13 @@ to actually respond) and falls back to an idle cadence otherwise.
 | `dial_display` | QSPI panel + touch + LVGL bring-up; owns the LVGL task and lock |
 | `dial_knob` | Rotary encoder decoding (`bidi_switch_knob`) |
 | `dial_state` | The single state snapshot, UI→worker command queue, NVS-backed prefs |
-| `dial_ui` | Screen router + all `scr_*` screens (connecting, Wi-Fi portal/picker/passkey, OAuth QR, dial, menu, settings, standby, quick actions, boost, about, error, welcome, side-pick) |
+| `dial_ui` | Screen router + all `scr_*` screens (connecting, Wi-Fi portal/picker/passkey, OAuth QR, dial, menu, settings, adjustment mode, brightness menu + picker, standby, boost, update, update prompt, updating, about, error, welcome, side-pick) |
 | `dial_net` | Wi-Fi bring-up, credential storage, SoftAP portal, network scan |
 | `dial_oauth` | OAuth 2.1 discovery, Dynamic Client Registration, PKCE authorize/token, refresh |
 | `dial_mcp` | Raw MCP-over-HTTP client (JSON-RPC `tools/call`, session id, SSE parsing) |
 | `dial_ota` | GitHub Releases version check + `esp_https_ota` download/apply/rollback |
-| `dial_haptics` | DRV2605 LRA effects (tick / stop / confirm / error), queued off the hot paths |
-| `dial_power` | Idle-driven backlight dimming/standby + "first input after wake is consumed" rule |
+| `dial_haptics` | DRV2605 LRA effects (tick / stop / confirm / error), queued off the hot paths; per-play strength clamp (Off / Low / High / Auto) and a mute the router holds across knob dispatch |
+| `dial_power` | Idle-driven backlight dimming/standby + "first input after wake is consumed" rule; day/night/night-clock duty tables and the sleep inhibit sources (a screen the user is mid-task on, or a long operation in flight) |
 | `dial_time` | SNTP + IANA→POSIX timezone resolution, so the clock survives reboots |
 | `i2c_bsp`, `lcd_bl_pwm_bsp`, `lcd_touch_bsp` | Low-level board bring-up (I2C bus, backlight PWM, touch controller) shared by the above |
 
@@ -91,7 +91,8 @@ single feature's bug can't corrupt unrelated state:
 |---|---|---|
 | `wifi` | `dial_net` | SSID/password |
 | `oauth` | `dial_oauth` | Registered client id, tokens, PKCE verifier |
-| `ui` | `dial_state` | Side (zone), °F/°C, temperature scale (`relmode`), haptics on/off, screen rotation |
+| `ui` | `dial_state` | Side (`zone`), °F/°C (`units`), temperature scale (`relmode`), screen rotation (`rot`), adjustment mode (`sched_follow`), haptics level, the three brightness levels (`bri_day2` / `bri_nite2` / `bri_nclk`), screen timeout (`scr_to`), and the update prefs (`beta`, `ota_auto`, `ota_defer`, `ota_skip`, `ota_shown`) |
+| `haptics` | `dial_haptics` | Calibrated LRA autocal results, so the driver skips recalibration on every boot |
 | `time` | `dial_time` | Resolved POSIX TZ string |
 
 Factory reset clears these namespaces and reboots into `PH_WIFI_PORTAL` as a
@@ -139,8 +140,23 @@ and their auth model.
 
 ## Updates
 
-`dial_ota` checks `chris023/orion-waveshare-rotary-dial`'s GitHub Releases
-once per day (and on demand from the About screen) for a tag matching the
-firmware's version scheme, and applies it over the air into the inactive OTA
-partition; the bootloader rolls back automatically if the new image fails its
-first successful poll.
+`dial_ota` checks `chris023/orion-waveshare-rotary-dial`'s GitHub Releases for
+a tag matching the firmware's version scheme, and applies it over the air into
+the inactive OTA partition. The check runs every 6 hours, plus on demand from
+the Update screen (Menu > Update). The interval carries a per-device offset
+derived from the MAC so a few thousand dials don't all hit the API on the same
+tick. Enabling **Beta builds** widens the query from `/releases/latest` (which
+excludes prereleases) to the full release list.
+
+Discovery is deliberately split in two, because this is a bedside device:
+
+- An **ambient "Update available" line** on the dial and standby faces —
+  unconditional whenever an update exists and it is not night.
+- A **one-tap prompt sheet**, raised at most once a day and only on a wake
+  edge (a human is provably present), never inside the sleep window.
+
+**Auto-update** (off by default) installs unattended in a quiet window after
+the schedule's wake time, and keeps the display dark while it runs. In every
+path — manual, prompted, or unattended — the bootloader rolls the image back
+automatically unless the new firmware confirms itself after a stable boot.
+`docs/SPEC-update-prompt.md` is the design record for all of the above.
