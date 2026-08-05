@@ -12,6 +12,20 @@ section in the same commit that bumps `PROJECT_VER`.
 Releases marked **(beta)** were prereleases, visible only to dials with
 "Beta builds" turned on.
 
+## 1.4.2 — 2026-08-05
+
+One beta cut, verified on hardware, promoted to stable:
+
+### Fixed
+
+- **The Rotation setting works again.** Tapping Rotation in Settings had
+  been refusing with an error buzz and an unchanged value: 1.4.0's
+  anti-tearing work quietly grew the memory that turning to 90° or 270°
+  requested at the moment of the tap, past what the dial has left once
+  Wi-Fi is up. The rotation now reserves a smaller working buffer once at
+  power-on, so the setting can't run out of memory mid-life. A dial already
+  sitting on a rotated screen keeps its orientation exactly as before.
+
 ## 1.4.2-beta.1 — 2026-08-05 (beta)
 
 ### Fixed
