@@ -4,19 +4,31 @@
  * the two brightness rows that used to live directly in Settings into the
  * same submenu shape as the Update screen). A single scrollable list:
  *
- *   < Back        -> SCR_SETTINGS
- *   Day           value = the current day percent (st->bri_day_pct); tap
- *                 opens the full-screen SCR_BRIGHTNESS picker with packed
- *                 arg 0.
- *   Night         value = the current night percent (st->bri_night_pct);
- *                 tap opens SCR_BRIGHTNESS with packed arg 1. Governs the
- *                 backlight while the dial is actually in use at night
- *                 (ACTIVE/DIMMED tiers).
- *   Night clock   value = the current night-clock percent
- *                 (st->bri_night_clock_pct); tap opens SCR_BRIGHTNESS with
- *                 packed arg 2. Governs ONLY the standby/screensaver clock
- *                 face at night — the thing that actually glows in a dark
- *                 bedroom all night, independent of "Night" above.
+ *   < Back           -> SCR_SETTINGS
+ *   Day              value = the current day percent (st->bri_day_pct); tap
+ *                    opens the full-screen SCR_BRIGHTNESS picker with packed
+ *                    arg 0. Deliberately unqualified — Day governs EVERY
+ *                    daytime tier, the daytime standby clock included, so a
+ *                    "(in use)" suffix here would be a lie.
+ *   Night (in use)   value = the current night percent (st->bri_night_pct);
+ *                    tap opens SCR_BRIGHTNESS with packed arg 1. Governs the
+ *                    backlight while the dial is actually in use at night
+ *                    (ACTIVE/DIMMED tiers).
+ *   Night (clock)    value = the current night-clock percent
+ *                    (st->bri_night_clock_pct), shown as "Off" at 0 — for
+ *                    the clock 0 is genuinely off (dial_power_night_clock_
+ *                    duty), and naming that state is what tells someone
+ *                    hunting "turn the screensaver off" that it exists. Tap
+ *                    opens SCR_BRIGHTNESS with packed arg 2. Governs ONLY
+ *                    the standby/screensaver clock face at night — the thing
+ *                    that actually glows in a dark bedroom all night.
+ *
+ * The two night rows share the "Night (…)" prefix on purpose (owner,
+ * 2026-08-05, after a field report): a bare "Night" row read as the umbrella
+ * for everything nocturnal, so it captured the tap meant for the clock glow
+ * — a user dialed "Night" to 0 and the clock kept shining. The shared prefix
+ * plus qualifier makes the pair read as an explicit fork, and neither leg
+ * can be mistaken for the whole.
  *
  * The picker (scr_brightness.c) owns the live preview and the actual
  * commit, same as when the first two rows lived in Settings directly — this
@@ -138,9 +150,9 @@ static void create(lv_obj_t *scr, void *arg)
     s_list = dial_list_create(scr, ROW_H);
 
     make_row(s_list, LV_SYMBOL_LEFT "  Back", row_back_cb, NULL);
-    make_row(s_list, "Day",         row_day_cb,         &s_val_day);
-    make_row(s_list, "Night",       row_night_cb,       &s_val_night);
-    make_row(s_list, "Night clock", row_night_clock_cb, &s_val_night_clock);
+    make_row(s_list, "Day",            row_day_cb,         &s_val_day);
+    make_row(s_list, "Night (in use)", row_night_cb,       &s_val_night);
+    make_row(s_list, "Night (clock)",  row_night_clock_cb, &s_val_night_clock);
 
     // Created AFTER the list so it draws over rows scrolling beneath it —
     // same fixed title slot the other menu sub-screens use.
@@ -176,8 +188,15 @@ static void on_state(const app_state_t *st)
     lv_label_set_text(s_val_day, buf);
     snprintf(buf, sizeof buf, "%u%%", (unsigned)st->bri_night_pct);
     lv_label_set_text(s_val_night, buf);
-    snprintf(buf, sizeof buf, "%u%%", (unsigned)st->bri_night_clock_pct);
-    lv_label_set_text(s_val_night_clock, buf);
+    // The clock's 0 IS off (see the header comment) — say so, don't make the
+    // user infer it from a percent. Only this row: Day/Night at 0 are
+    // dimmest-legible, not off (scr_brightness.c's BRI_MIN_PCT comment).
+    if (st->bri_night_clock_pct == 0) {
+        lv_label_set_text(s_val_night_clock, "Off");
+    } else {
+        snprintf(buf, sizeof buf, "%u%%", (unsigned)st->bri_night_clock_pct);
+        lv_label_set_text(s_val_night_clock, buf);
+    }
 }
 
 // The knob walks the focused row (one per detent, dial_list's rotor snap) —

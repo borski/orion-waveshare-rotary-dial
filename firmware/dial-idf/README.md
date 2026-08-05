@@ -172,8 +172,10 @@ itself:
   menu sub-screen (or tap its "Back" row) returns to the menu.
 - **Menu → Settings:** adjustment mode (Schedule/Hold — the default for what a
   dial-side change does), **Brightness** (its own sub-screen: separate Day,
-  Night, and Night clock levels, each a full-screen 0–100% picker you can drag
-  or turn), screen timeout (5s/15s/30s/1m before the standby clock takes over),
+  Night (in use), and Night (clock) levels, each a full-screen 0–100% picker
+  you can drag or turn — Night (clock) at 0 reads "Off", and off means off:
+  the standby clock goes fully dark, and a touch or a knob turn still wakes
+  the dial), screen timeout (5s/15s/30s/1m before the standby clock takes over),
   temperature scale (Absolute °F/°C, or Orion's −10…+10 relative levels), units
   (°C/°F, used for the absolute readouts), haptics (Off / Low / High / Auto —
   Auto is High by day and Low at night), screen rotation, Away mode, and two

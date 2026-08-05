@@ -12,6 +12,20 @@ section in the same commit that bumps `PROJECT_VER`.
 Releases marked **(beta)** were prereleases, visible only to dials with
 "Beta builds" turned on.
 
+## 1.4.1 — 2026-08-05
+
+### Changed
+
+- **The Brightness rows are now Day, Night (in use), and Night (clock)** —
+  after a report of someone dimming "Night" to 0 and wondering why the clock
+  kept glowing. The two night settings were too easy to mistake for each
+  other: Night (in use) is the dial while you're actually using it at night;
+  Night (clock) is the clock face that glows while you sleep. The pickers'
+  captions now say the same thing, so a wrong tap corrects itself.
+- **Night (clock) at zero now reads "Off"** — in the Brightness menu and in
+  the picker — because that's what it is: the standby clock goes fully dark,
+  and a touch or a turn of the knob still wakes the dial.
+
 ## 1.4.0 — 2026-08-04
 
 ### Added

@@ -44,7 +44,7 @@
 // simulator reports as installed (stubs.c's esp_app_desc_t, which tracks
 // PROJECT_VER) — otherwise the screenshots show a dial offering to update
 // itself to something it already runs. Bump it with each release.
-#define SIM_OTA_LATEST "1.4.1"
+#define SIM_OTA_LATEST "1.4.2"
 
 /* ---- host framebuffer + LVGL display driver ----------------------------- */
 
@@ -133,6 +133,10 @@ static void ensure_dir(const char *path)
 // Converts the host RGB565 framebuffer to RGBA8888 and stamps a 180px-radius
 // anti-aliased circular alpha mask over it (the round panel), then writes it
 // as docs/screens/<name>.png.
+static int s_snapshots_written;   // counted for the "done:" summary — a
+                                  // hardcoded total drifted the first time a
+                                  // scenario was added
+
 static void snapshot(const char *name)
 {
     static uint8_t rgba[SCREEN_W * SCREEN_H * 4];
@@ -183,6 +187,7 @@ static void snapshot(const char *name)
         }
     }
     printf("wrote %-16s %s (%d distinct colors sampled)\n", name, path, n_seen);
+    s_snapshots_written++;
 }
 
 /* ---- scenario baseline --------------------------------------------------- */
@@ -560,8 +565,9 @@ static void scenario_adjust_mode(void)
 }
 
 // The Brightness submenu (M7, collapses Settings' old separate Day/Night
-// rows): shows both last-committed percents read straight off app_state_t,
-// same contract those two rows had before the collapse.
+// rows): shows the last-committed percents read straight off app_state_t
+// (and "Off" for a Night (clock) at 0), same contract the rows had before
+// the collapse.
 static void scenario_brightness_menu(void)
 {
     apply_baseline();
@@ -571,7 +577,7 @@ static void scenario_brightness_menu(void)
 }
 
 // The full-screen SCR_BRIGHTNESS picker (replaces the old inline settings-row
-// edit — see scr_brightness.c) opened on the Night row, then knob-adjusted
+// edit — see scr_brightness.c) opened on the Night (in use) row, then knob-adjusted
 // so the render shows a deliberately chosen value (and the drag handle parked
 // at it) rather than the untouched opening state — same idiom scenario_boost
 // uses for its own picker. Turned UP, not down: the picker opens on the stored
@@ -589,10 +595,10 @@ static void scenario_settings_brightness(void)
     snapshot("brightness");
 }
 
-// The same picker opened on the new Night clock row (packed arg 2) — mainly
-// to verify the shorter "NIGHT CLOCK" caption clears the arc's chord at the
-// same y-offset tuned for "NIGHT BRIGHTNESS" (see scr_brightness.c's create()
-// comment), and that the live preview visibly differs from the Night row
+// The same picker opened on the Night (clock) row (packed arg 2) — mainly
+// to verify the "NIGHT (CLOCK)" caption clears the arc's chord at the
+// same y-offset tuned for the old "NIGHT BRIGHTNESS" (see scr_brightness.c's
+// create() comment), and that the live preview visibly differs from the Night row
 // above (it previews the NIGHT table's STANDBY duty, deliberately very dim).
 // sim_knob(+3) drains as one on_knob(+3) batch: |batch|>=3 accelerates to
 // BRI_ACCEL_3_MULT (6%/detent), so the 20% default -> 20 + 3*6 = 38%.
@@ -604,6 +610,28 @@ static void scenario_settings_brightness_clock(void)
     sim_knob(3);   // 20% -> 38% (accelerated: 3 detents * 6%/detent)
     pump_ms(300);
     snapshot("brightness-clock");
+}
+
+// The clock picker driven to 0 — the one value on this row that is a state,
+// not a level: the standby clock goes genuinely dark
+// (dial_power_night_clock_duty(0) == 0), and the unit slot names it, "Off"
+// replacing "%" — the 88px numeral font is digits-only, so the word rides
+// the small label (scr_brightness.c's render_numeral).
+static void scenario_settings_brightness_clock_off(void)
+{
+    apply_baseline();
+    // The previous scenario ends with this same picker open on this same row,
+    // and ui_router_go no-ops on an identical id+arg pair (ui_router.c) — so
+    // step out to the menu first to force a real rebuild, then re-seed the
+    // pref that stepping out just committed (destroy() persisted its 38%).
+    ui_router_go(SCR_BRIGHTNESS_MENU, NULL, LV_SCR_LOAD_ANIM_NONE);
+    pump_ms(100);
+    sim_state_ptr()->bri_night_clock_pct = 20;
+    ui_router_go(SCR_BRIGHTNESS, (void *)(uintptr_t)2 /* night clock */, LV_SCR_LOAD_ANIM_NONE);
+    pump_ms(300);
+    sim_knob(-6);   // one -6 batch: 6%/detent -> -36, clamping at the 0 rail -> "Off"
+    pump_ms(300);
+    snapshot("brightness-clock-off");
 }
 
 static void scenario_wifi_info(void)
@@ -718,12 +746,13 @@ int main(void)
     scenario_brightness_menu();
     scenario_settings_brightness();
     scenario_settings_brightness_clock();
+    scenario_settings_brightness_clock_off();
     scenario_wifi_info();
     scenario_about();
     scenario_updating();
     scenario_standby();
     scenario_standby_update();
 
-    printf("done: 27 screens rendered to %s\n", DIAL_SIM_OUTPUT_DIR);
+    printf("done: %d screens rendered to %s\n", s_snapshots_written, DIAL_SIM_OUTPUT_DIR);
     return 0;
 }

@@ -7,9 +7,11 @@
  * with a big number (the temperature dial, scr_boost's duration picker), so
  * brightness now matches that vocabulary: same caption styling, same big
  * numeral font, same display-only rim arc, same detent/zoom-bump/range-stop
- * feel. `arg` packs which row opened it: 0 = day, 1 = night, 2 = night
- * clock (the standby/screensaver face at night — see dial_state.h's
- * bri_night_clock_pct comment).
+ * feel. `arg` packs which row opened it: 0 = day, 1 = night in-use, 2 =
+ * night clock (the standby/screensaver face at night — see dial_state.h's
+ * bri_night_clock_pct comment). Captions echo the menu rows' "(IN USE)/
+ * (CLOCK)" naming — the disambiguation has to hold at the point of
+ * adjustment too, or a wrong tap on the menu goes uncorrected here.
  *
  * The night-clock row previews and commits the NIGHT table's STANDBY duty
  * (dial_power's DPWR_STANDBY), not ACTIVE like the other two rows — see
@@ -181,6 +183,11 @@ static void render_numeral(int pct)
     char t[8];
     snprintf(t, sizeof(t), "%d", pct);
     lv_label_set_text(s_num_lbl, t);
+    // The clock row's 0 is genuinely off, and the numeral font is digits-only
+    // (dial_font_num_88.c's --range), so the off state is named in the unit
+    // slot instead: "%" becomes "Off" under the big 0. Never on Day/Night —
+    // their 0 is dimmest-legible, not off (see BRI_MIN_PCT's comment).
+    lv_label_set_text(s_unit_lbl, (s_clock && pct == 0) ? "Off" : "%");
 }
 
 /* ---- palette -------------------------------------------------------------*/
@@ -341,17 +348,16 @@ static void create(lv_obj_t *scr, void *arg)
     // Caption.
     s_title_lbl = lv_label_create(scr);
     lv_obj_set_style_text_font(s_title_lbl, &lv_font_montserrat_16, 0);
-    lv_label_set_text(s_title_lbl, s_clock ? "NIGHT CLOCK"
-                                  : s_night ? "NIGHT BRIGHTNESS"
+    lv_label_set_text(s_title_lbl, s_clock ? "NIGHT (CLOCK)"
+                                  : s_night ? "NIGHT (IN USE)"
                                             : "DAY BRIGHTNESS");
-    // 84, not scr_boost's 64: this caption is nearly twice as wide as
-    // "BOOST HEAT", and the arc's inner edge (r=149) leaves only ~159px of
-    // chord at y=54 (a 16px-font line's top edge there) — "NIGHT BRIGHTNESS"
-    // measures ~155px, so its corners nearly touched the stroke. 20px lower
-    // the chord opens to ~209px, restoring a comfortable margin on both
-    // sides without crowding the numeral below. "NIGHT CLOCK" is shorter
-    // still (~115px), so the same offset clears the stroke with room to
-    // spare — no per-row offset needed.
+    // 84, not scr_boost's 64: tuned when the widest caption here was
+    // "NIGHT BRIGHTNESS" (~155px at this font), whose corners nearly touched
+    // the arc's inner edge (r=149) at y=54, where the chord is only ~159px;
+    // 20px lower it opens to ~209px. The night captions have since shortened
+    // to the "(IN USE)/(CLOCK)" forms, leaving "DAY BRIGHTNESS" (~140px) the
+    // widest, but the offset stays — it still clears with margin, and one
+    // shared offset beats a per-row one.
     lv_obj_align(s_title_lbl, LV_ALIGN_CENTER, 0, 84 - CY);
 
     // Percent numeral — fixed anchor box, same slot as scr_boost's duration.
@@ -367,13 +373,14 @@ static void create(lv_obj_t *scr, void *arg)
     lv_obj_set_style_transform_pivot_x(s_num_lbl, LV_PCT(50), 0);
     lv_obj_set_style_transform_pivot_y(s_num_lbl, LV_PCT(50), 0);
     lv_obj_center(s_num_lbl);
-    render_numeral(s_pct);
 
-    // Unit, below the numeral.
+    // Unit, below the numeral. Created BEFORE the first render_numeral call,
+    // which owns this label's text ("%" normally, "Off" at the clock row's
+    // genuinely-off 0 — see its comment).
     s_unit_lbl = lv_label_create(scr);
     lv_obj_set_style_text_font(s_unit_lbl, &lv_font_montserrat_20, 0);
-    lv_label_set_text(s_unit_lbl, "%");
     lv_obj_align(s_unit_lbl, LV_ALIGN_CENTER, 0, 214 - CY);
+    render_numeral(s_pct);
 
     apply_palette();
 
