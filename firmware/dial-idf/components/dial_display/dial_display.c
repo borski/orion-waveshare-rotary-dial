@@ -225,8 +225,21 @@ static const sh8601_lcd_init_cmd_t lcd_init_cmds[] = {
 #endif
 };
 
+// Runs in the SPI ISR when a color transfer completes. Normally that means
+// the flush is done and LVGL may reuse the draw buffer — but a 90/270 flush
+// sends SEVERAL transfers out of one shared strip buffer (see the rotation
+// comment below), and for those the flush_cb is parked on s_strip_sem waiting
+// to reuse that buffer; it signals LVGL itself after the last strip.
+static volatile bool s_strip_mode;   // set only while flush_cb issues strips
+static SemaphoreHandle_t s_strip_sem;
+
 static bool example_notify_lvgl_flush_ready(esp_lcd_panel_io_handle_t panel_io, esp_lcd_panel_io_event_data_t *edata, void *user_ctx)
 {
+    if (s_strip_mode) {
+        BaseType_t woken = pdFALSE;
+        xSemaphoreGiveFromISR(s_strip_sem, &woken);
+        return woken == pdTRUE;
+    }
     lv_disp_drv_t *disp_driver = (lv_disp_drv_t *)user_ctx;
     lv_disp_flush_ready(disp_driver);
     return false;
@@ -250,11 +263,30 @@ static bool example_notify_lvgl_flush_ready(esp_lcd_panel_io_handle_t panel_io, 
  * A quarter turn preserves that: 359 - odd is even, and 359 - even is odd.
  *
  * 180° reverses the buffer in place. 90°/270° transpose, which needs somewhere
- * to put the result, so a DMA-capable scratch buffer is allocated the first
- * time one of those is selected.
+ * to put the result — and the size of that somewhere is the part with history.
+ * It used to be a whole flush chunk, sized off EXAMPLE_LVGL_BUF_HEIGHT and
+ * allocated lazily on first use; when the tearing fix grew the draw buffers
+ * to 90 lines (user_config.h), that silently grew this scratch to 64.8KB of
+ * contiguous internal DMA RAM requested at TAP time, which the post-Wi-Fi
+ * heap could no longer supply — the Rotation row died with an error buzz. So
+ * the scratch is now a fixed ROT_STRIP_LINES-row strip, deliberately NOT tied
+ * to the flush chunk size, and allocated once at startup before Wi-Fi claims
+ * the internal heap. A 90/270 flush transposes strip by strip, each strip its
+ * own draw_bitmap. ROT_STRIP_LINES must stay even to preserve the rounder's
+ * parity at the strip seams.
+ *
+ * The strips share the one scratch, and draw_bitmap is async DMA — so the
+ * flush_cb waits on s_strip_sem (given by the transfer-done ISR above) before
+ * refilling it, and tells LVGL the flush is over only after the last strip.
+ * The cost is that a rotated-90/270 dial's chunk goes out as up to three
+ * transactions again, giving back a little of the tearing fix on those two
+ * orientations only; 0° is untouched and 180° still flushes in one piece.
  */
+#define ROT_STRIP_LINES 30
+_Static_assert((ROT_STRIP_LINES & 1) == 0, "strip seams must keep y1 even / y2 odd for the panel");
+
 static uint8_t     s_rot;        // quarter turns clockwise
-static lv_color_t *s_rot_buf;    // transpose scratch (90/270 only)
+static lv_color_t *s_rot_buf;    // strip transpose scratch (90/270 only), allocated at startup
 
 uint8_t dial_display_rotation(void) { return s_rot; }
 
@@ -264,12 +296,10 @@ bool dial_display_set_rotation(uint8_t quarters)
     if (quarters == s_rot) return true;
 
     if ((quarters & 1) && !s_rot_buf) {
-        s_rot_buf = heap_caps_malloc(EXAMPLE_LCD_H_RES * EXAMPLE_LVGL_BUF_HEIGHT * sizeof(lv_color_t),
-                                     MALLOC_CAP_DMA);
-        if (!s_rot_buf) {
-            ESP_LOGE(TAG, "no DMA memory for the rotation buffer — staying at %d", s_rot * 90);
-            return false;
-        }
+        // Only possible if the startup allocation in dial_display_start
+        // failed, which the boot log would already have shouted about.
+        ESP_LOGE(TAG, "no rotation strip buffer — staying at %d", s_rot * 90);
+        return false;
     }
     s_rot = quarters;
     ESP_LOGI(TAG, "rotation: %d degrees", s_rot * 90);
@@ -307,16 +337,15 @@ static void example_lvgl_flush_cb(lv_disp_drv_t *drv, const lv_area_t *area, lv_
 
     // Rotate on the way out. W == H here (square panel), which is why 90/270
     // need no resolution swap.
-    lv_color_t *out = color_map;
     if (s_rot) {
         const int W = EXAMPLE_LCD_H_RES, H = EXAMPLE_LCD_V_RES;
         const int x1 = offsetx1, y1 = offsety1, x2 = offsetx2, y2 = offsety2;
         const int w = x2 - x1 + 1, h = y2 - y1 + 1;
 
-        switch (s_rot) {
-        case 2:   // 180: (x,y) -> (W-1-x, H-1-y). Row-major order of the
-                  // destination is the source read backwards, so one reverse
-                  // of the buffer does it — no scratch needed.
+        if (s_rot == 2) {
+            // 180: (x,y) -> (W-1-x, H-1-y). Row-major order of the
+            // destination is the source read backwards, so one reverse
+            // of the buffer does it — no scratch needed.
             offsetx1 = W - 1 - x2; offsetx2 = W - 1 - x1;
             offsety1 = H - 1 - y2; offsety2 = H - 1 - y1;
             for (int i = 0, j = w * h - 1; i < j; i++, j--) {
@@ -324,30 +353,41 @@ static void example_lvgl_flush_cb(lv_disp_drv_t *drv, const lv_area_t *area, lv_
                 color_map[i] = color_map[j];
                 color_map[j] = t;
             }
-            break;
-
-        case 1:   // 90 CW: (x,y) -> (H-1-y, x). Destination is h wide, w tall.
-            offsetx1 = H - 1 - y2; offsetx2 = H - 1 - y1;
-            offsety1 = x1;         offsety2 = x2;
-            for (int j = 0; j < w; j++)
-                for (int i = 0; i < h; i++)
-                    s_rot_buf[j * h + i] = color_map[(h - 1 - i) * w + j];
-            out = s_rot_buf;
-            break;
-
-        default:  // 270 CW: (x,y) -> (y, W-1-x).
-            offsetx1 = y1;         offsetx2 = y2;
-            offsety1 = W - 1 - x2; offsety2 = W - 1 - x1;
-            for (int j = 0; j < w; j++)
-                for (int i = 0; i < h; i++)
-                    s_rot_buf[j * h + i] = color_map[i * w + (w - 1 - j)];
-            out = s_rot_buf;
-            break;
+        } else {
+            // 90/270: transpose ROT_STRIP_LINES source rows at a time through
+            // the shared strip scratch, each strip its own draw_bitmap (see
+            // the rotation comment above for why not one big buffer). The
+            // wait before refilling is what keeps one scratch sufficient.
+            s_strip_mode = true;
+            for (int ys = y1; ys <= y2; ys += ROT_STRIP_LINES) {
+                const int ye = (ys + ROT_STRIP_LINES - 1 < y2) ? ys + ROT_STRIP_LINES - 1 : y2;
+                const int hs = ye - ys + 1;
+                int dx1, dy1, dx2, dy2;
+                if (s_rot == 1) {   // 90 CW: (x,y) -> (H-1-y, x)
+                    dx1 = H - 1 - ye; dx2 = H - 1 - ys;
+                    dy1 = x1;         dy2 = x2;
+                    for (int j = 0; j < w; j++)
+                        for (int i = 0; i < hs; i++)
+                            s_rot_buf[j * hs + i] = color_map[(ye - y1 - i) * w + j];
+                } else {            // 270 CW: (x,y) -> (y, W-1-x)
+                    dx1 = ys;         dx2 = ye;
+                    dy1 = W - 1 - x2; dy2 = W - 1 - x1;
+                    for (int j = 0; j < w; j++)
+                        for (int i = 0; i < hs; i++)
+                            s_rot_buf[j * hs + i] = color_map[(ys - y1 + i) * w + (w - 1 - j)];
+                }
+                esp_lcd_panel_draw_bitmap(panel_handle, dx1, dy1, dx2 + 1, dy2 + 1, s_rot_buf);
+                if (xSemaphoreTake(s_strip_sem, pdMS_TO_TICKS(1000)) != pdTRUE)
+                    ESP_LOGE(TAG, "rotation strip transfer never completed");
+            }
+            s_strip_mode = false;
+            lv_disp_flush_ready(drv);
+            return;
         }
     }
 
     // copy a buffer's content to a specific area of the display
-    esp_lcd_panel_draw_bitmap(panel_handle, offsetx1, offsety1, offsetx2 + 1, offsety2 + 1, out);
+    esp_lcd_panel_draw_bitmap(panel_handle, offsetx1, offsety1, offsetx2 + 1, offsety2 + 1, color_map);
 }
 
 static void example_lvgl_rounder_cb(struct _lv_disp_drv_t *disp_drv, lv_area_t *area)
@@ -539,6 +579,16 @@ void dial_display_start(void)
     assert(buf2);
     //initialize LVGL draw buffers
     lv_disp_draw_buf_init(&disp_buf, buf1, buf2, EXAMPLE_LCD_H_RES * EXAMPLE_LVGL_BUF_HEIGHT);
+
+    // 90/270 rotation strip scratch (see the rotation comment above) —
+    // claimed HERE, before Wi-Fi eats the internal DMA heap, precisely so the
+    // Rotation setting can't die of a failed allocation months into a
+    // device's life. Not an assert: a dial that can't rotate is still a dial,
+    // and set_rotation refuses 90/270 cleanly when this is NULL.
+    s_rot_buf = heap_caps_malloc(EXAMPLE_LCD_H_RES * ROT_STRIP_LINES * sizeof(lv_color_t), MALLOC_CAP_DMA);
+    if (!s_rot_buf) ESP_LOGE(TAG, "no DMA memory for the rotation strip buffer — 90/270 will be unavailable");
+    s_strip_sem = xSemaphoreCreateBinary();
+    assert(s_strip_sem);
 
     ESP_LOGI(TAG, "Register display driver to LVGL");
     lv_disp_drv_init(&disp_drv);

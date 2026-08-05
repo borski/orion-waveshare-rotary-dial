@@ -143,7 +143,7 @@ static void row_rotation_cb(lv_event_t *e)
     dial_state_get(&st);
     uint8_t next = (st.rotation + 1) & 3;
     if (!dial_display_set_rotation(next)) {
-        dial_haptics_play(HAPTIC_ERROR);   // no memory for the 90/270 scratch buffer
+        dial_haptics_play(HAPTIC_ERROR);   // 90/270 scratch missing since boot (OOM)
         return;
     }
     dial_state_set_rotation(next);
