@@ -4,7 +4,7 @@
  * the zone the buttons belong to together with the heat/cool choice chosen
  * by which glyph was tapped: `(zone<<1)|heat`.
  *
- * The knob steps the duration (+-5min, clamped 5..120, default 30) using the
+ * The knob steps the duration (+-5min, clamped 5..120, default 15) using the
  * same detent/zoom-bump/range-stop vocabulary as scr_dial's temperature arc;
  * the arc here is display-only (duration/120), not draggable, so a swipe
  * down (cancel) isn't fighting an arc drag for the touch.
@@ -34,7 +34,7 @@ LV_FONT_DECLARE(dial_font_num_88)
 #define BOOST_MIN_MIN     5
 #define BOOST_MAX_MIN   120
 #define BOOST_STEP_MIN    5
-#define BOOST_DEFAULT_MIN 30
+#define BOOST_DEFAULT_MIN 15
 
 static lv_obj_t *s_arc;
 static lv_obj_t *s_title_lbl;
@@ -118,6 +118,7 @@ static void start_event_cb(lv_event_t *e)
 {
     (void)e;
     dial_haptics_play(HAPTIC_CONFIRM);
+    dial_state_set_boost_minutes((uint8_t)s_minutes);
     // Optimistic from THIS task, before the command is queued: the worker
     // commits the same thing, but it may be mid-poll, and the dial face
     // should already show the boost by the time this screen tears down.
@@ -145,7 +146,7 @@ static void create(lv_obj_t *scr, void *arg)
     uintptr_t packed = (uintptr_t)arg;
     s_heat    = (packed & 1u) != 0;
     s_zone    = (zone_idx_t)(packed >> 1);
-    s_minutes = BOOST_DEFAULT_MIN;
+    s_minutes = dial_state_get_boost_minutes();
 
     const dial_palette_t *pal = PAL();
     lv_obj_set_style_bg_color(scr, pal->bg, 0);

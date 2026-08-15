@@ -12,6 +12,7 @@
 #include "dial_haptics.h"
 #include "dial_ota.h"
 #include "dial_icons.h"
+#include "esp_timer.h"
 #include <math.h>
 #include <time.h>
 
@@ -21,9 +22,8 @@ LV_FONT_DECLARE(dial_font_num_88)
 #define CY 180   // given as an absolute (x,y); we align everything to the
                  // screen's center and offset by (x-CX, y-CY).
 #define ARC_R 165
-#define HOT_FLASH_MINUTES 15
-#define HOT_FLASH_CONFIRM_MS 3000
-#define HOT_FLASH_CANCEL_DETENTS 8
+#define BOOST_CONFIRM_MIN_MS 1000
+#define BOOST_CONFIRM_MAX_MS 2100
 
 static lv_obj_t *s_arc;
 static lv_obj_t *s_stale_dot;
@@ -103,6 +103,10 @@ static bool s_rel;
 // (owner decision) so a stray turn can't silently rewrite the setpoint by up
 // to 2.5°C while the pill still counts down. Set from apply_palette_and_state.
 static bool s_relief_active;
+static bool s_relief_heat;
+static int64_t s_relief_cancel_us;
+static int s_boost_arm_dir;
+static int64_t s_boost_arm_us;
 
 // Current configured arc range (°F). Absolute mode keeps the shipped 55–110;
 // relative mode widens to 50–113 so all 21 levels are reachable (owner: widen
@@ -129,15 +133,6 @@ static bool s_stale_shown;
 // shown zone's relief is active — created lazily on the transition into
 // relief, deleted on the transition out (and on destroy()).
 static lv_timer_t *s_boost_timer;
-static uint32_t s_hot_flash_armed_ms;
-static uint32_t s_hot_flash_cancel_ms;
-static int s_hot_flash_cancel_detents;
-static lv_timer_t *s_hot_flash_arm_timer;
-static lv_timer_t *s_hot_flash_haptic_timer;
-static int s_hot_flash_haptic_left;
-
-static void apply_palette_and_state(const app_state_t *st);
-static void render_numeral(int temp_f);
 
 /* ---- motion helpers (design-spec.md §6) -------------------------------- */
 
@@ -191,61 +186,6 @@ static void anim_opa(lv_obj_t *obj, lv_opa_t from, lv_opa_t to, uint32_t time_ms
     lv_anim_set_time(&a, time_ms);
     lv_anim_set_path_cb(&a, lv_anim_path_linear);
     lv_anim_start(&a);
-}
-
-static void hot_flash_disarm(void)
-{
-    s_hot_flash_armed_ms = 0;
-    s_hot_flash_cancel_ms = 0;
-    s_hot_flash_cancel_detents = 0;
-    if (s_hot_flash_arm_timer) {
-        lv_timer_del(s_hot_flash_arm_timer);
-        s_hot_flash_arm_timer = NULL;
-    }
-}
-
-static bool hot_flash_is_armed(void)
-{
-    return s_hot_flash_armed_ms && lv_tick_elaps(s_hot_flash_armed_ms) <= HOT_FLASH_CONFIRM_MS;
-}
-
-static void hot_flash_haptic_timer_cb(lv_timer_t *t)
-{
-    (void)t;
-    dial_haptics_play_soft(HAPTIC_CONFIRM);
-    if (--s_hot_flash_haptic_left <= 0)
-        s_hot_flash_haptic_timer = NULL;
-}
-
-static void hot_flash_triple_haptic(void)
-{
-    if (s_hot_flash_haptic_timer) {
-        lv_timer_del(s_hot_flash_haptic_timer);
-        s_hot_flash_haptic_timer = NULL;
-    }
-    s_hot_flash_haptic_left = 3;
-    hot_flash_haptic_timer_cb(NULL);
-    if (s_hot_flash_haptic_left > 0) {
-        s_hot_flash_haptic_timer = lv_timer_create(hot_flash_haptic_timer_cb, 140, NULL);
-        lv_timer_set_repeat_count(s_hot_flash_haptic_timer, s_hot_flash_haptic_left);
-    }
-}
-
-static void hot_flash_arm_timer_cb(lv_timer_t *t)
-{
-    (void)t;
-    s_hot_flash_arm_timer = NULL;   // one-shot: LVGL deletes the timer after this callback
-    hot_flash_disarm();
-
-    if (!s_arc || s_dragging) return;
-    app_state_t st;
-    dial_state_get(&st);
-    if (!st.have_state) return;
-    const zone_state_t *z = &st.zones[s_zone];
-    s_shown_f = (st.ui_temp_f[s_zone] >= 0) ? st.ui_temp_f[s_zone] : dial_c_to_f(z->temp_c);
-    apply_palette_and_state(&st);
-    lv_arc_set_value(s_arc, s_shown_f);
-    render_numeral(s_shown_f);
 }
 
 // State chevron pulse: pill glyph opa 60%<->100%, 1.2s day / 2.4s night,
@@ -419,6 +359,7 @@ static void apply_palette_and_state(const app_state_t *st)
     // power disc below stays kind-based (boost doesn't change on/off meaning).
     bool relief = z->relief_active;
     s_relief_active = relief;    // knob guard reads this without a fresh snapshot
+    s_relief_heat = z->relief_heat;   // decides which way the cancel gesture turns
     lv_color_t relief_accent = z->relief_heat ? pal->accent_heat : pal->accent_cool;
     lv_color_t arc_accent = relief ? relief_accent : accent;
 
@@ -502,13 +443,17 @@ static void apply_palette_and_state(const app_state_t *st)
         // above already is accent_heat/accent_cool by z->relief_heat) — so
         // the chip visually matches whichever icon started this boost.
         glyph = z->relief_heat ? DIAL_ICON_FLAME : DIAL_ICON_SNOW3;
-        if (st->clock_valid && z->relief_end_ms > 0) {
-            int remain_s = (int)(z->relief_end_ms / 1000 - (int64_t)time(NULL));
-            if (remain_s < 0) remain_s = 0;
-            snprintf(word, sizeof(word), "%d:%02d", remain_s / 60, remain_s % 60);
-        } else {
+        // "Until H:MM" rather than a ticking countdown (owner request): the
+        // end time is the fact worth knowing, it matches every other state
+        // this chip shows, and it doesn't force a re-render every second.
+        // Falls back to the bare word when the clock isn't usable, since
+        // without it there is no honest time to print.
+        time_t   end_s = (time_t)(z->relief_end_ms / 1000);
+        struct tm end_lt;
+        if (st->clock_valid && z->relief_end_ms > 0 && localtime_r(&end_s, &end_lt))
+            format_until(end_lt.tm_hour * 60 + end_lt.tm_min, word, sizeof(word));
+        else
             snprintf(word, sizeof(word), "BOOST");
-        }
     } else {
         // §3: the pill's permanent, non-relief job is now "will this setpoint
         // hold, or expire" — not restating HEATING/COOLING/OFFLINE/STANDBY,
@@ -788,57 +733,54 @@ static void post_temp_for(zone_idx_t zone, int temp_f)
 
 static void post_temp(int temp_f) { post_temp_for(s_zone, temp_f); }
 
-static void start_hot_flash_boost(zone_idx_t zone)
+static void clear_boost_arm(void)
 {
-    if (zone == s_zone) s_shown_f = s_arc_min;
-    hot_flash_disarm();
-    hot_flash_triple_haptic();
-    dial_state_set_relief_optimistic(zone, true, false,
-                                     (int64_t)time(NULL) * 1000 + (int64_t)HOT_FLASH_MINUTES * 60000);
+    s_boost_arm_dir = 0;
+    s_boost_arm_us = 0;
+}
+
+static void start_rail_boost(zone_idx_t zone, bool heat)
+{
+    uint8_t minutes = dial_state_get_boost_minutes();
+    if (zone == s_zone) s_shown_f = heat ? s_arc_max : s_arc_min;
+    clear_boost_arm();
+    dial_state_set_relief_optimistic(zone, true, heat,
+                                     (int64_t)time(NULL) * 1000 + (int64_t)minutes * 60000);
     app_cmd_t cmd = { .kind = CMD_BOOST_START, .zone = zone,
-                      .a = 0, .b = HOT_FLASH_MINUTES };
+                      .a = heat ? 1 : 0, .b = minutes };
     dial_cmd_post(&cmd);
 }
 
-static void cancel_hot_flash_boost(void)
+static void cancel_boost(void)
 {
-    hot_flash_disarm();
-    hot_flash_triple_haptic();
-    dial_state_set_relief_optimistic(-1, false, false, 0);   // device-wide, like the call itself
+    dial_state_set_relief_optimistic(-1, false, false, 0);
     app_cmd_t cmd = { .kind = CMD_BOOST_CANCEL };
     dial_cmd_post(&cmd);
 }
 
-static void arm_hot_flash_boost(void)
+static bool handle_rail_boost_arm(int dir)
 {
-    s_hot_flash_armed_ms = lv_tick_get();
-    if (s_hot_flash_arm_timer) lv_timer_del(s_hot_flash_arm_timer);
-    s_hot_flash_arm_timer = lv_timer_create(hot_flash_arm_timer_cb, HOT_FLASH_CONFIRM_MS, NULL);
-    lv_timer_set_repeat_count(s_hot_flash_arm_timer, 1);
+    int64_t now = esp_timer_get_time();
+    if (s_boost_arm_dir == dir) {
+        int64_t elapsed_us = now - s_boost_arm_us;
+        if (elapsed_us < (int64_t)BOOST_CONFIRM_MIN_MS * 1000) {
+            return true;
+        }
+        if (elapsed_us <= (int64_t)BOOST_CONFIRM_MAX_MS * 1000) {
+            dial_haptics_play_triple_confirm();
+            start_rail_boost(s_zone, dir > 0);
+            return true;
+        }
+    }
+    if (s_boost_arm_dir == -dir) {
+        clear_boost_arm();
+        dial_haptics_play_soft(HAPTIC_STOP);
+        return true;
+    }
+    s_boost_arm_dir = dir;
+    s_boost_arm_us = now;
     dial_haptics_play_soft(HAPTIC_STOP);
-    anim_nudge(s_num_box, -1);
-    anim_nudge(s_arc, -1);
-}
-
-static void track_hot_flash_cancel(int detents)
-{
-    if (detents <= 0) {
-        s_hot_flash_cancel_ms = 0;
-        s_hot_flash_cancel_detents = 0;
-        dial_haptics_play_soft(HAPTIC_STOP);
-        return;
-    }
-
-    uint32_t now = lv_tick_get();
-    if (!s_hot_flash_cancel_ms || lv_tick_elaps(s_hot_flash_cancel_ms) > HOT_FLASH_CONFIRM_MS) {
-        s_hot_flash_cancel_ms = now;
-        s_hot_flash_cancel_detents = 0;
-        dial_haptics_play_soft(HAPTIC_STOP);
-    }
-
-    s_hot_flash_cancel_detents += detents;
-    if (s_hot_flash_cancel_detents >= HOT_FLASH_CANCEL_DETENTS)
-        cancel_hot_flash_boost();
+    return true;
 }
 
 // Setpoint handle drag. The handle is the ONLY temperature touch target: the
@@ -896,13 +838,9 @@ static void handle_event_cb(lv_event_t *e)
         position_handle(f);
     }
     if (f == s_press_f) return;   // a tap that didn't move commits nothing
-    if (f <= s_arc_min) {
-        if (hot_flash_is_armed()) start_hot_flash_boost(zone);
-        else                     arm_hot_flash_boost();
-    } else {
-        hot_flash_disarm();
-        post_temp_for(zone, f);
-    }
+    if (f <= s_arc_min)      start_rail_boost(zone, false);
+    else if (f >= s_arc_max) start_rail_boost(zone, true);
+    else                     post_temp_for(zone, f);
 }
 
 // Tap the ambient "Update available" notice (only clickable while it's
@@ -950,11 +888,7 @@ static void pill_event_cb(lv_event_t *e)
     (void)e;
     if (!s_relief_active) return;
     dial_haptics_play(HAPTIC_CONFIRM);
-    // Optimistic FIRST, from this task: the worker commits too, but it may be
-    // mid-poll and the queued command would then land seconds later.
-    dial_state_set_relief_optimistic(-1, false, false, 0);   // device-wide, like the call itself
-    app_cmd_t cmd = { .kind = CMD_BOOST_CANCEL };
-    dial_cmd_post(&cmd);
+    cancel_boost();
 }
 
 // Long-press the POWER DISC (§2 — quick-actions' screen-wide long-press is
@@ -1011,6 +945,9 @@ static void create(lv_obj_t *scr, void *arg)
     s_units_c = false;   // on_state (called right after create) sets the real value
     s_rel = false;
     s_relief_active = false;
+    s_relief_heat = false;
+    s_relief_cancel_us = 0;
+    clear_boost_arm();
     s_dragging = false;
     s_arc_min = s_arc_max = -1;   // force configure_arc_range() on this arc
     const dial_palette_t *pal = PAL();
@@ -1435,12 +1372,8 @@ static void destroy(void)
     if (s_pill_glyph) lv_anim_del(s_pill_glyph, NULL);
     if (s_stale_dot)  lv_anim_del(s_stale_dot, NULL);
     if (s_boost_timer) { lv_timer_del(s_boost_timer); s_boost_timer = NULL; }
-    if (s_hot_flash_arm_timer) { lv_timer_del(s_hot_flash_arm_timer); s_hot_flash_arm_timer = NULL; }
-    if (s_hot_flash_haptic_timer) { lv_timer_del(s_hot_flash_haptic_timer); s_hot_flash_haptic_timer = NULL; }
 
     s_actual_f = -1.0f;
-    hot_flash_disarm();
-    s_hot_flash_haptic_left = 0;
 
     s_level = NULL;
     s_zero_notch = NULL;
@@ -1519,10 +1452,42 @@ static bool on_knob(int detents)
 {
     if (!s_arc || s_shown_f < 0) return false;
 
-    // A boost is modal: left/cold input stays inert, but a deliberate heatward
-    // swing cancels it for the same sleepy, no-touch workflow that starts it.
+    // A boost is a modal thing you started deliberately (owner decision): while
+    // relief is active the knob is inert, so a stray detent can't rewrite the
+    // setpoint under the counting-down pill. Consumed (returns true) with a
+    // stop cue, never applied. The exception is the cancel gesture, which is
+    // the mirror of the one that started it: a heat boost (armed by pushing
+    // right) cancels leftward, a cool boost cancels rightward.
     if (s_relief_active) {
-        track_hot_flash_cancel(detents);
+        clear_boost_arm();
+        int cancel_dir = s_relief_heat ? -1 : 1;
+        if (((detents > 0) ? 1 : -1) == cancel_dir) {
+            int64_t now = esp_timer_get_time();
+            if (s_relief_cancel_us) {
+                int64_t elapsed_us = now - s_relief_cancel_us;
+                if (elapsed_us < (int64_t)BOOST_CONFIRM_MIN_MS * 1000) {
+                    return true;
+                }
+                if (elapsed_us <= (int64_t)BOOST_CONFIRM_MAX_MS * 1000) {
+                    s_relief_cancel_us = 0;
+                    dial_haptics_play_triple_confirm();
+                    cancel_boost();
+                    return true;
+                }
+            }
+            s_relief_cancel_us = now;
+            dial_haptics_play_soft(HAPTIC_STOP);
+            return true;
+        } else {
+            s_relief_cancel_us = 0;
+        }
+        dial_haptics_play_soft(HAPTIC_STOP);
+        return true;
+    }
+
+    if (s_boost_arm_dir && ((detents > 0) ? 1 : -1) == -s_boost_arm_dir) {
+        clear_boost_arm();
+        dial_haptics_play_soft(HAPTIC_STOP);
         return true;
     }
 
@@ -1543,12 +1508,12 @@ static bool on_knob(int detents)
         if (nf > s_arc_max) nf = s_arc_max;
     }
     if (nf == s_shown_f) {                          // pinned at the range stop
-        if (detents < 0 && nf <= s_arc_min) {
-            if (hot_flash_is_armed()) start_hot_flash_boost(s_zone);
-            else                     arm_hot_flash_boost();
-            return true;
+        if (detents < 0 && nf <= s_arc_min) handle_rail_boost_arm(-1);
+        else if (detents > 0 && nf >= s_arc_max) handle_rail_boost_arm(1);
+        else {
+            clear_boost_arm();
+            dial_haptics_play_soft(HAPTIC_STOP);
         }
-        dial_haptics_play_soft(HAPTIC_STOP);
         int dir = detents > 0 ? 1 : -1;
         anim_nudge(s_num_box, dir);
         anim_nudge(s_arc, dir);
@@ -1561,11 +1526,12 @@ static bool on_knob(int detents)
     level_render(nf);
     position_handle(nf);
     anim_zoom_bump(s_temp_lbl);
-    if (nf <= s_arc_min) {
-        if (hot_flash_is_armed()) start_hot_flash_boost(s_zone);
-        else                     arm_hot_flash_boost();
+    if (nf <= s_arc_min && detents < 0) {
+        handle_rail_boost_arm(-1);
+    } else if (nf >= s_arc_max && detents > 0) {
+        handle_rail_boost_arm(1);
     } else {
-        hot_flash_disarm();
+        clear_boost_arm();
         post_temp(nf);
     }
     return true;

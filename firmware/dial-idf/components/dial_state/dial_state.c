@@ -35,6 +35,11 @@ static inline uint8_t clamp_haptics_level(uint8_t level)
     return (level <= 3) ? level : 1;
 }
 
+static inline uint8_t clamp_boost_minutes(uint8_t minutes)
+{
+    return (minutes >= 5 && minutes <= 120) ? minutes : 15;
+}
+
 // Defends the screen-timeout pref on read/write. A legal stored value is
 // EITHER 90 (the legacy hardcoded threshold this pref defaults to — see
 // app_state_t.screen_timeout_s) OR one of the five values
@@ -71,6 +76,7 @@ void dial_state_init(void)
     s_state.phase = PH_BOOT;
     s_state.wifi_join_idx = -1;   // no on-device join attempted yet
     s_state.haptics_level = 1;        // HAPTIC_LEVEL_LOW — the default feel (see dial_haptics.h)
+    s_state.boost_minutes = 15;
     // Fresh-device brightness defaults, chosen by the owner after living with
     // the dial on a nightstand (2026-07-29): full brightness is uncomfortable
     // in a bedroom, and a device that arrives glaring is worse than one that
@@ -120,6 +126,7 @@ void dial_state_restore_prefs(void)
     nvs_handle_t h;
     if (nvs_open(NVS_NS, NVS_READONLY, &h) != ESP_OK) return;
     uint8_t zone = 0, units = 0, haptics = 1 /* HAPTIC_LEVEL_LOW */, rot = 0, relmode = 1;
+    uint8_t boost_minutes = 15;
     uint8_t bri_day = 100, bri_night = 100, bri_nclk = 100;
     uint8_t beta = 0;
     uint8_t sched_follow = 1;   // matches init's fresh-device default (Follow)
@@ -129,6 +136,7 @@ void dial_state_restore_prefs(void)
     bool have_zone    = nvs_get_u8(h, "zone", &zone) == ESP_OK && zone < ZONE_COUNT;
     bool have_units   = nvs_get_u8(h, "units", &units) == ESP_OK;
     bool have_haptics = nvs_get_u8(h, "haptics", &haptics) == ESP_OK;
+    bool have_boost   = nvs_get_u8(h, "boost_min", &boost_minutes) == ESP_OK;
     bool have_rot     = nvs_get_u8(h, "rot", &rot) == ESP_OK && rot < 4;
     bool have_rel     = nvs_get_u8(h, "relmode", &relmode) == ESP_OK;
     // v1.2.x moved Day/Night from a 10-100 slider to 0-100, where 0 means
@@ -161,7 +169,7 @@ void dial_state_restore_prefs(void)
     size_t ota_skip_sz  = sizeof(ota_skip);
     bool have_ota_skip  = nvs_get_str(h, "ota_skip", ota_skip, &ota_skip_sz) == ESP_OK;
     nvs_close(h);
-    if (!have_zone && !have_units && !have_haptics && !have_rot && !have_rel
+    if (!have_zone && !have_units && !have_haptics && !have_boost && !have_rot && !have_rel
         && !have_bri_day && !have_bri_night && !have_bri_nclk && !have_scr_to && !have_beta
         && !have_sched_follow
         && !have_ota_auto && !have_ota_defer && !have_ota_shown && !have_ota_skip) return;
@@ -182,6 +190,7 @@ void dial_state_restore_prefs(void)
     // right level with zero migration code. clamp defends only against a
     // corrupt byte or a future level this build predates.
     if (have_haptics) s_state.haptics_level = clamp_haptics_level(haptics);
+    if (have_boost) s_state.boost_minutes = clamp_boost_minutes(boost_minutes);
     if (have_rot)     s_state.rotation      = rot;
     // Temperature scale. If we've ever persisted it, honor it. Otherwise, if
     // this device was set up before this release (has a "zone" key but no
@@ -454,6 +463,30 @@ void dial_state_set_relief_optimistic(int zone, bool active, bool heat, int64_t 
     }
     s_state.generation++;
     xSemaphoreGive(s_mux);
+}
+
+uint8_t dial_state_get_boost_minutes(void)
+{
+    xSemaphoreTake(s_mux, portMAX_DELAY);
+    uint8_t v = clamp_boost_minutes(s_state.boost_minutes);
+    xSemaphoreGive(s_mux);
+    return v;
+}
+
+void dial_state_set_boost_minutes(uint8_t minutes)
+{
+    minutes = clamp_boost_minutes(minutes);
+    xSemaphoreTake(s_mux, portMAX_DELAY);
+    s_state.boost_minutes = minutes;
+    s_state.generation++;
+    xSemaphoreGive(s_mux);
+
+    nvs_handle_t h;
+    if (nvs_open(NVS_NS, NVS_READWRITE, &h) == ESP_OK) {
+        nvs_set_u8(h, "boost_min", minutes);
+        nvs_commit(h);
+        nvs_close(h);
+    }
 }
 
 void dial_state_set_haptics_level(uint8_t level)

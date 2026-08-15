@@ -405,6 +405,10 @@ typedef struct {
     // it maps to exactly Off/Auto with no migration; 2 (Low) and 3 (High)
     // are new. See dial_state_set_haptics_level.
     uint8_t haptics_level;
+    // Last successfully started Boost duration, in minutes. The Boost picker
+    // opens at this value, and rail shortcuts use the same remembered duration.
+    // Persisted to NVS "ui"/"boost_min"; defaults to 15.
+    uint8_t boost_minutes;
     // Day/night backlight brightness, 10..100 (percent), 10% steps. dial_power
     // scales its whole duty table (active/dimmed/standby together) by this at
     // apply time; dial_power_start() is what actually enforces it. Defaults to
@@ -644,6 +648,11 @@ void dial_state_set_haptics_level(uint8_t level);
 // own commit then reconciles, and reverts if the call fails.
 // zone < 0 applies to every zone (cancel_thermal_relief is device-wide).
 void dial_state_set_relief_optimistic(int zone, bool active, bool heat, int64_t end_ms);
+
+// Last-started Boost duration preference, minutes. Legal values are the Boost
+// picker's 5..120 minute range; corrupt/out-of-range values fall back to 15.
+uint8_t dial_state_get_boost_minutes(void);
+void    dial_state_set_boost_minutes(uint8_t minutes);
 
 // Day/night backlight brightness preference, 10..100 (percent, 10% steps).
 // Getters always return a value in that range (clamped on read; 100 when no

@@ -162,15 +162,22 @@ itself:
   stop pulse.
 - **Touch:** tap the power button on the dial screen to turn that side on/off;
   long-press it to open the Schedule/Hold picker. Tap the snowflake or flame
-  icon sitting at either end of the temperature arc to choose a timed boost
-  (cool or heat); for a sleepy hot-flash shortcut, swing the dial to the cold
-  end once for a confirming buzz, then push cold again within three seconds to
-  start the default 15-minute cool boost with a snowflake countdown. While it
-  runs, swing toward heat to cancel. Tap the status pill above the power button:
-  during a boost it shows a snowflake/flame countdown and an ✕ that cancels it;
-  otherwise it reads "Holding" or "Until H:MM" depending on whether your last
-  change rides until you touch it again or only until the schedule's next step.
-  Swipe left/right to move
+  icon sitting at either end of the temperature arc to start a timed boost
+  (cool or heat). For sleepy rail shortcuts, push past the cold or hot end
+  once to arm with a single bump, then keep pushing the same way; extra turns
+  stay quiet for about a second, then a triple bump confirms and starts
+  the last-used Boost duration, defaulting to 15 minutes.
+  Turn the opposite way to cancel arming. Tap
+  the status pill above the power button — it reads
+  "Holding" or "Until H:MM" depending on whether your last change rides until
+  you touch it again or only until the schedule's next step — to jump straight
+  to that same Schedule/Hold picker; while a boost is running it instead shows
+  that boost's end time and an ✕ that cancels it; while a boost is running the
+  knob cancels it with the mirror of the gesture that started it — turn away
+  from the boost (left during a heat boost, right during a cool one) once to
+  arm with a single bump, then again about a second later for the stronger
+  confirm-and-cancel. Swipe
+  left/right to move
   between your side, your partner's side, and the menu. Swipe right on any
   menu sub-screen (or tap its "Back" row) returns to the menu.
 - **Menu → Settings:** adjustment mode (Schedule/Hold — the default for what a

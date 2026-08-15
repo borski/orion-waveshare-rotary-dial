@@ -84,10 +84,12 @@ board bring-up notes, and firmware architecture live in
   face says which is in effect, and when it runs out.
 - **Boost heat or cool** from the icons at either end of the temperature
   arc — a timed push in one direction that returns you to where you were.
-  For a sleepy hot-flash shortcut, swing the dial to the cold end once for a
-  confirming buzz, then push cold again within three seconds to start the
-  default 15-minute cool boost with a snowflake countdown. While it runs, swing
-  toward heat to cancel.
+  For sleepy shortcuts, push past the cold or hot rail once to arm with a
+  single bump, then keep pushing the same way; extra turns stay quiet for about
+  a second, then a triple bump confirms and starts the last-used Boost
+  duration, defaulting to 15 minutes. The opposite turn
+  cancels arming, and once a Boost is running the same arm-then-confirm turn
+  in the opposite direction cancels it.
 - **Quiet knob, honest haptics** — the encoder's own mechanical detents are
   the feedback when you turn it; the motor only fires where it tells you
   something the clicks can't, like hitting the end of a range. Strength is

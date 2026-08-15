@@ -230,6 +230,32 @@ void dial_haptics_play(haptic_effect_t fx)
     xQueueOverwrite(s_q, &req);
 }
 
+void dial_haptics_play_unmuted(haptic_effect_t fx)
+{
+    if (!s_present || !s_q) return;
+    haptic_req_t req = { fx, false };
+    xQueueOverwrite(s_q, &req);
+}
+
+static void triple_confirm_task(void *arg)
+{
+    (void)arg;
+    haptic_req_t soft = { HAPTIC_STOP, true };
+    for (int i = 0; i < 2; i++) {
+        xQueueOverwrite(s_q, &soft);
+        vTaskDelay(pdMS_TO_TICKS(140));
+    }
+    haptic_req_t firm = { HAPTIC_CONFIRM, false };
+    xQueueOverwrite(s_q, &firm);
+    vTaskDelete(NULL);
+}
+
+void dial_haptics_play_triple_confirm(void)
+{
+    if (!s_present || !s_q) return;
+    xTaskCreate(triple_confirm_task, "haptic_pat", 2048, NULL, 4, NULL);
+}
+
 // Deliberately ignores s_muted: this is the one pulse that must survive the
 // router's knob-dispatch mute (see the header). Still honours OFF, which the
 // task enforces.
