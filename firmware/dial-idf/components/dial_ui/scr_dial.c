@@ -1526,13 +1526,19 @@ static bool on_knob(int detents)
     level_render(nf);
     position_handle(nf);
     anim_zoom_bump(s_temp_lbl);
+    // A detent that MOVES the setpoint always commits it, including the one
+    // that lands exactly on a rail — arriving at the rail is a legitimate
+    // setpoint, and skipping the post here left the face showing the rail
+    // while the bed stayed a level behind it. Landing on the rail also primes
+    // the Boost arm, so the gesture is "reach the rail, keep pushing" rather
+    // than requiring a wasted detent to first pin against the stop.
+    post_temp(nf);
     if (nf <= s_arc_min && detents < 0) {
         handle_rail_boost_arm(-1);
     } else if (nf >= s_arc_max && detents > 0) {
         handle_rail_boost_arm(1);
     } else {
         clear_boost_arm();
-        post_temp(nf);
     }
     return true;
 }
