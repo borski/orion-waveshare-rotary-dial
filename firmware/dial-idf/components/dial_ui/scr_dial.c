@@ -838,9 +838,14 @@ static void handle_event_cb(lv_event_t *e)
         position_handle(f);
     }
     if (f == s_press_f) return;   // a tap that didn't move commits nothing
-    if (f <= s_arc_min)      start_rail_boost(zone, false);
-    else if (f >= s_arc_max) start_rail_boost(zone, true);
-    else                     post_temp_for(zone, f);
+    // Always commit, rails included. value_from_point() clamps into
+    // [s_arc_min, s_arc_max], so "at the rail" and "past the rail" are the same
+    // value here — there is no past to detect, and treating the rail as a Boost
+    // trigger made the coldest and hottest setpoints impossible to drag to.
+    // The rail-push Boost stays a knob gesture, where continued turning through
+    // a quiet window expresses intent that a clamped drag cannot. On the touch
+    // path the snowflake and flame icons already start a Boost in one tap.
+    post_temp_for(zone, f);
 }
 
 // Tap the ambient "Update available" notice (only clickable while it's

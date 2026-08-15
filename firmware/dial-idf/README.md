@@ -159,15 +159,18 @@ itself:
   other screens (menus, network/password pickers) to move focus or dial in a
   value. Turning is deliberately silent — the encoder's own mechanical
   detents are the feedback — but hitting the end of a range gives a distinct
-  stop pulse.
+  stop pulse. For a sleepy shortcut, keep turning once you reach the cold or
+  hot end of the temperature range: the first detent at the rail arms with a
+  single bump, further turns stay quiet for about a second, and the next one
+  after that confirms with a triple bump and starts the last-used Boost
+  duration, defaulting to 15 minutes. Turn the opposite way, or simply stop,
+  to cancel arming.
 - **Touch:** tap the power button on the dial screen to turn that side on/off;
   long-press it to open the Schedule/Hold picker. Tap the snowflake or flame
   icon sitting at either end of the temperature arc to start a timed boost
-  (cool or heat). For sleepy rail shortcuts, push past the cold or hot end
-  once to arm with a single bump, then keep pushing the same way; extra turns
-  stay quiet for about a second, then a triple bump confirms and starts
-  the last-used Boost duration, defaulting to 15 minutes.
-  Turn the opposite way to cancel arming. Tap
+  (cool or heat). Dragging the arc handle only ever sets the temperature —
+  the rails are ordinary setpoints there, and the icons are the one-tap way to
+  start a boost by hand. Tap
   the status pill above the power button — it reads
   "Holding" or "Until H:MM" depending on whether your last change rides until
   you touch it again or only until the schedule's next step — to jump straight
