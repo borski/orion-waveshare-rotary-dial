@@ -77,7 +77,14 @@ board bring-up notes, and firmware architecture live in
   from either nightstand.
 - **Absolute or relative temperature** — read the setpoint as a real
   temperature (**°F or °C**, your choice) or as an Orion-style **−10…+10
-  level**, switchable in settings. Fresh dials default to relative.
+  level**, switchable in settings, or by tapping the big number on the dial
+  face. Fresh dials default to relative.
+- **A ring that counts, not sweeps** — on the relative scale the ring breaks
+  into 21 segments, one per level, with the one you're on lit and thickened
+  and the stretch back to neutral washed in the same colour. The levels
+  aren't evenly spaced in degrees and never were, so a continuous sweep was
+  quietly lying about them; this way you can read the setting from across a
+  dark room without reading the number.
 - **Schedule or hold** — a change made on the dial can either ride your
   Orion schedule (the next scheduled step still happens, matching what the
   app does) or hold for the rest of the night. A status chip on the dial
@@ -121,8 +128,7 @@ board bring-up notes, and firmware architecture live in
 <tr>
 <td align="center">Pick your side</td>
 <td align="center">The dial</td>
-<td align="center">Relative scale</td>
-<td align="center">Holds until schedule</td>
+<td align="center">Relative scale</td><td align="center">Holds until schedule</td>
 </tr>
 <tr>
 <td align="center"><img src="docs/screens/boost.png" width="170" alt="Thermal-relief boost screen"></td>
