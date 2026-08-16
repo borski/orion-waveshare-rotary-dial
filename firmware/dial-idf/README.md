@@ -173,18 +173,27 @@ itself:
   (cool or heat). Dragging the arc handle only ever sets the temperature —
   the rails are ordinary setpoints there, and the icons are the one-tap way to
   start a boost by hand. Tap
-  the status pill above the power button — it reads
-  "Holding" or "Until H:MM" depending on whether your last change rides until
-  you touch it again or only until the schedule's next step — to jump straight
-  to that same Schedule/Hold picker; while a boost is running it instead shows
   that boost's end time and an ✕ that cancels it; while a boost is running the
   knob cancels it with the mirror of the gesture that started it — turn away
   from the boost (left during a heat boost, right during a cool one) once to
   arm with a single bump, then again about a second later for the stronger
-  confirm-and-cancel. Swipe
-  left/right to move
-  between your side, your partner's side, and the menu. Swipe right on any
-  menu sub-screen (or tap its "Back" row) returns to the menu.
+  confirm-and-cancel. Tap the big number itself to switch between the absolute
+  temperature and Orion's −10…+10 level — the same setting Settings → Scale
+  writes, so it sticks across a reboot. Swipe left/right to move between your
+  side, your partner's side, and the menu. Swipe right on any menu sub-screen
+  (or tap its "Back" row) returns to the menu.
+- **The level ring.** On the relative scale the dial face swaps its continuous
+  arc for 21 discrete segments, one per level. The levels were never evenly
+  spaced in degrees — they carry hand-picked °F values across 10–45 °C — so a
+  smooth sweep was quietly implying a precision the scale doesn't have. The
+  ring carries the scale's own colour, cool at −10 through neutral at 0 to warm
+  at +10, which means the segment you're on doesn't have to introduce a new
+  colour to stand out: it's the same hue, at full strength and a few pixels
+  fatter. The stretch back to neutral stays lit so distance from centre is a
+  length rather than arithmetic, level 0 keeps a quiet grey mark of its own so
+  the ring reads bipolar at a glance, and a thin underline hugs whichever
+  segment the water is actually sitting under right now. Absolute mode is
+  unchanged — same arc, same handle, same water level.
 - **Menu → Settings:** adjustment mode (Schedule/Hold — the default for what a
   dial-side change does), **Brightness** (its own sub-screen: separate Day,
   Night (in use), and Night (clock) levels, each a full-screen 0–100% picker
