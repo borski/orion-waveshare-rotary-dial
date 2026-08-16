@@ -545,7 +545,12 @@ static void segments_render(int target_f)
     // material from anything else — only louder or quieter:
     //   rest   the whole scale, dim enough to read as chassis
     //   trail  neutral -> the setting, so distance from neutral is a length
-    //   active full strength and 6px fatter
+    //   active full strength and 6px fatter — but only while the side is ON.
+    //          Off, the wedge keeps its colour and position but drops back to
+    //          the ordinary stroke: the fat segment is the loudest mark on the
+    //          face and it kept reading as "this side is running" to someone
+    //          who had just switched it off. Off, the ring should say what the
+    //          setting IS, not press on it.
     lv_opa_t trail_opa = (lv_opa_t)((int)SEG_TRAIL_OPA * (int)s_seg_lit_opa / 255);
     lv_opa_t rest_opa  = (lv_opa_t)((int)SEG_REST_OPA  * (int)s_seg_lit_opa / 255);
 
@@ -562,7 +567,7 @@ static void segments_render(int target_f)
         lv_opa_t   opa;
         lv_coord_t w = SEG_W;
         if (active) {
-            opa = s_seg_lit_opa;  w = SEG_W_ACTIVE;
+            opa = s_seg_lit_opa;  w = s_seg_zone_on ? SEG_W_ACTIVE : SEG_W;
         } else if (trail) {
             opa = trail_opa;
         } else if (l == 0) {
