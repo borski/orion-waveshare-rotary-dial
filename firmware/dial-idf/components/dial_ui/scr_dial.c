@@ -126,33 +126,22 @@ static float seg_center(int i)
 }
 
 /*
- * Water level, drawn as a VALUE STEP rather than a texture: no stripes, no
- * second material — the arc says where the water is purely by changing the
- * value of what's already there. One overlay arc, two configurations, and the
- * boundary between them IS the water level:
+ * The measured water temperature is reported in two places, and deliberately
+ * NOT as a mark on the setpoint's own band.
  *
- *   HEATING  water below the setpoint, so the water sits UNDER the accent fill.
- *            That stretch of fill is deepened (a `bg` wash over it), leaving the
- *            rest of the fill bright: dark = water that's really there, bright =
- *            the heat still to add.
- *   COOLING  water above the setpoint, so it overshoots the fill. The overshoot
- *            is the accent at low opacity over the bare track: a ghost of the
- *            fill, which is exactly what it is — heat that has to leave.
+ *   RELATIVE  an inner underline (seg_tick_render) on its own radius, hugging
+ *             whichever of the 21 segments the bed is currently under.
+ *   BOTH      the WATER caption under the side name, which keeps its degree
+ *             sign on every face.
  *
- * There is nothing to alias and nothing to animate, and the water never becomes
- * a third color to decode: it's the same accent, one step down in value.
- *
- * The under-fill stretch is not deepened when cooling — the water level there is
- * already above the setpoint by definition, so the only thing worth marking is
- * where it overshoots to.
- *
- * Recomputed only when a poll moves the water or the user moves the target.
+ * An earlier absolute-mode design washed the arc itself between the setpoint
+ * and the water (a "value step"): same band, same accent, one step down in
+ * value. On hardware that reads as a second mark competing with the setpoint
+ * fill for the same meaning — the owner sees one arc with two boundaries on it
+ * and has to work out which one is the setting. It has been removed; absolute
+ * mode's arc now carries the setpoint and nothing else, which is the same
+ * separation the relative ring already had.
  */
-#define LEVEL_OPA_UNDER  77     // ~30%: `bg` wash deepening the fill  (heating)
-#define LEVEL_OPA_OVER   82     // ~32%: accent ghost over the track   (cooling)
-
-static lv_obj_t  *s_level;              // the value-step overlay arc
-static lv_color_t s_level_accent;       // cached: the drag path has no state snapshot
 static float      s_actual_f = -1.0f;   // measured water temp, °F; <0 = unknown
 
 static lv_obj_t *s_name_lbl;
@@ -341,21 +330,18 @@ static bool zone_is_off(void)
     return !st.zones[s_zone].on;
 }
 
-/* ---- water level: value step over the arc ------------------------------ */
+/* ---- water level ------------------------------------------------------- */
 
-// Temperature -> degrees into the arc's own 0..270 sweep (rotation adds 135).
-// Same mapping the setpoint indicator uses, so the level and the fill land on
-// one scale. Uses the CURRENT arc range so the water overlay stays aligned with
-// the (mode-dependent) indicator — 55–110 in absolute, 50–113 in relative.
-static uint16_t level_angle(float f)
-{
-    if (f < s_arc_min) f = s_arc_min;
-    if (f > s_arc_max) f = s_arc_max;
-    float d = 270.0f * (f - s_arc_min) / (float)(s_arc_max - s_arc_min);
-    return (uint16_t)lroundf(d);
-}
+// The absolute face used to wash the arc between the setpoint and the measured
+// water temperature. It is gone: on the device that wash reads as a second,
+// competing mark on the same band as the setpoint fill, which is exactly the
+// confusion the relative face avoids by giving the measurement its own inner
+// underline on its own radius (seg_tick_render). The live reading is reported
+// by that underline in relative mode, and by the WATER caption in both — the
+// caption keeps its degree sign on every face, so no absolute-mode information
+// is lost with the wash.
 
-// Point the arc (and thus level_angle) at the range the current scale needs.
+// Point the arc at the range the current scale needs.
 // Cheap and idempotent — only touches the widget when the range actually
 // changes (a mode toggle OR a fresh device-reported range landing), so it
 // never disturbs an in-progress drag. Absolute mode's rails come from the
@@ -441,36 +427,6 @@ static int value_from_point(lv_point_t p)
     return s_arc_min + (int)lroundf(frac * (float)(s_arc_max - s_arc_min));
 }
 
-static void level_render(int target_f)
-{
-    if (!s_level) return;
-    // Relative mode draws the water nowhere: the level ring's segments are a
-    // scale of settings, not of degrees, so a continuous water boundary laid
-    // over them would be measuring one thing against another. The measurement
-    // is not lost — it gets the inner underline (seg_tick_render) plus the WATER
-    // caption, which keeps its degree sign in every mode.
-    if (s_rel || s_actual_f < 0) {              // no measurement yet
-        lv_obj_add_flag(s_level, LV_OBJ_FLAG_HIDDEN);
-        return;
-    }
-
-    uint16_t a_water = level_angle(s_actual_f);
-    uint16_t a_set   = level_angle((float)target_f);
-    bool cooling = a_water > a_set;
-
-    uint16_t a0 = cooling ? a_set : 0;
-    uint16_t a1 = a_water;
-    if (a1 <= a0 + 1) {                         // at target: no step to draw
-        lv_obj_add_flag(s_level, LV_OBJ_FLAG_HIDDEN);
-        return;
-    }
-
-    lv_obj_set_style_arc_color(s_level, cooling ? s_level_accent : PAL()->bg, LV_PART_INDICATOR);
-    lv_obj_set_style_arc_opa(s_level, cooling ? LEVEL_OPA_OVER : LEVEL_OPA_UNDER, LV_PART_INDICATOR);
-    lv_arc_set_angles(s_level, a0, a1);
-    lv_obj_clear_flag(s_level, LV_OBJ_FLAG_HIDDEN);
-}
-
 /* ---- level ring: the 21 segments -------------------------------------- */
 
 // The ring's own colour ramp: accent_cool at level −10, through
@@ -508,9 +464,14 @@ static lv_color_t seg_ramp(int level, const dial_palette_t *pal)
 
 // How loud a LIT segment is allowed to be, mirroring the arc indicator's own
 // state tiers (see apply_palette_and_state): COVER normally, LV_OPA_30 for a
-// standby zone, transparent when offline. Cached like s_level_accent because
+// standby zone, transparent when offline. Cached because
 // the drag and detent paths re-render without a fresh state snapshot.
 static lv_opa_t s_seg_lit_opa = LV_OPA_COVER;
+
+// Whether the zone was ON at the last state snapshot. Cached for the same
+// reason as s_seg_lit_opa: seg_tick_render runs from the drag and detent paths
+// too, which have no snapshot to consult.
+static bool s_seg_zone_on = true;
 
 // Which segment the bed is currently sitting under. This DOES round the
 // measurement onto the ring's 21 stops, which the earlier free-floating tick
@@ -540,7 +501,16 @@ static void seg_tick_render(const dial_palette_t *pal)
     // Follows the segments' state tier: an offline zone has no live reading to
     // report, so the underline goes with the rest of the ring rather than
     // hanging there asserting a stale number.
-    if (!s_rel || s_seg_lit_opa == LV_OPA_TRANSP || !seg_water_level(s_actual_f, &lvl)) {
+    //
+    // A zone that is switched OFF drops it too, even though the reading is
+    // still arriving and still true. Dimming it was not enough on hardware:
+    // a live mark tracking the water up the ring is the single most active-
+    // looking thing on the face, and on a dark bedside dial that is read as
+    // "this side is running" by someone who just turned it off. Off should
+    // look off — the WATER caption still carries the number for anyone who
+    // wants it.
+    if (!s_rel || !s_seg_zone_on ||
+        s_seg_lit_opa == LV_OPA_TRANSP || !seg_water_level(s_actual_f, &lvl)) {
         lv_obj_add_flag(s_seg_tick, LV_OBJ_FLAG_HIDDEN);
         return;
     }
@@ -685,8 +655,8 @@ static void apply_palette_and_state(const app_state_t *st)
     // sweep outright, and leaving the track underneath would be worse than
     // redundant — it paints straight through the 1° gaps and welds the 21
     // segments back into one bar. The widget itself stays alive and ranged
-    // (configure_arc_range above) because level_angle and the drag path still
-    // read its geometry.
+    // (configure_arc_range above) because the drag path still reads its
+    // geometry.
     lv_obj_set_style_arc_color(s_arc, pal->track, LV_PART_MAIN);
     lv_obj_set_style_arc_opa(s_arc, s_rel ? LV_OPA_TRANSP : LV_OPA_70, LV_PART_MAIN);
     lv_obj_set_style_arc_color(s_arc, arc_accent, LV_PART_INDICATOR);
@@ -697,15 +667,12 @@ static void apply_palette_and_state(const app_state_t *st)
     // inventing its own, so an offline or standby zone quiets identically in
     // both scales — then the arc's own indicator is switched off.
     s_seg_lit_opa = indic_opa;
+    s_seg_zone_on = z->on;
     lv_obj_set_style_arc_opa(s_arc, s_rel ? LV_OPA_TRANSP : indic_opa, LV_PART_INDICATOR);
 
-    // Water level. Cached in °F (and the accent with it) so a drag or a detent
-    // can re-draw the step without waiting for the next poll — the water doesn't
-    // move while you turn the knob, but the setpoint does, and that's what
-    // decides which side of it the water is on.
+    // Water reading. Cached in °F so the drag and detent paths can re-draw the
+    // relative face's underline without waiting for the next poll.
     s_actual_f = (z->actual_c >= 0) ? (float)dial_c_to_f(z->actual_c) : -1.0f;
-    s_level_accent = arc_accent;
-    level_render(s_shown_f);
     segments_render(s_shown_f);
 
     // Side name + identity underline.
@@ -1155,13 +1122,12 @@ static void handle_event_cb(lv_event_t *e)
         lv_point_t p;
         lv_indev_get_point(indev, &p);
         int f = value_from_point(p);
-        // Live feedback: the fill, numeral (nearest level in relative), water
-        // step and handle all follow the finger; nothing is committed until
+        // Live feedback: the fill, numeral (nearest level in relative), ring
+        // and handle all follow the finger; nothing is committed until
         // release (matches the old arc-drag behaviour).
         s_shown_f = f;
         lv_arc_set_value(s_arc, f);
         render_numeral(f);
-        level_render(f);
         segments_render(f);
         position_handle(f);
         dial_state_stamp_input();
@@ -1176,7 +1142,6 @@ static void handle_event_cb(lv_event_t *e)
         s_shown_f = f;
         lv_arc_set_value(s_arc, f);
         render_numeral(f);
-        level_render(f);
         segments_render(f);
         position_handle(f);
     }
@@ -1360,23 +1325,6 @@ static void create(lv_obj_t *scr, void *arg)
     // below is the only thing that sets temperature.
     lv_obj_clear_flag(s_arc, LV_OBJ_FLAG_CLICKABLE);
 
-    // #4 Water level: a value-step overlay sharing the arc's exact geometry,
-    // created after it so it lands on top of the fill. Rounded caps to match
-    // every other arc on the face — a square end read as a different material
-    // sitting on the ring rather than as part of it.
-    s_level = lv_arc_create(scr);
-    lv_obj_set_size(s_level, 2 * ARC_R, 2 * ARC_R);
-    lv_obj_center(s_level);
-    lv_arc_set_rotation(s_level, 135);
-    lv_arc_set_bg_angles(s_level, 0, 270);
-    lv_arc_set_angles(s_level, 0, 0);
-    lv_obj_set_style_arc_opa(s_level, LV_OPA_TRANSP, LV_PART_MAIN);   // no second track
-    lv_obj_set_style_arc_width(s_level, 16, LV_PART_INDICATOR);
-    lv_obj_set_style_arc_rounded(s_level, true, LV_PART_INDICATOR);
-    lv_obj_remove_style(s_level, NULL, LV_PART_KNOB);
-    lv_obj_clear_flag(s_level, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_add_flag(s_level, LV_OBJ_FLAG_HIDDEN);   // until the first measurement
-
     // Level ring — 21 segments over the arc's own sweep, one per level, drawn
     // only in relative mode (segments_render). Created here, between the arc
     // and the boost glyphs, so the existing move_foreground chain below keeps
@@ -1538,7 +1486,7 @@ static void create(lv_obj_t *scr, void *arg)
 
     // Explicit z-order guarantee (owner, on hardware: "the boost icons dont
     // sit above the arc when its on"). Creation order already puts these
-    // four objects after s_arc/s_level/s_zero_notch (all created above) —
+    // four objects after s_arc/s_zero_notch (all created above) —
     // verified against rendered pixels too: the glyph's own texture is
     // visible layered over the fill's rounded end-cap at the cool end in
     // dial.png, not replaced by solid fill colour, so nothing here was
@@ -1802,10 +1750,10 @@ static void destroy(void)
 
     s_actual_f = -1.0f;
 
-    s_level = NULL;
     for (int i = 0; i < SEG_N; i++) s_seg[i] = NULL;
     s_seg_tick = NULL;
     s_seg_lit_opa = LV_OPA_COVER;
+    s_seg_zone_on = true;
     s_handle = NULL;
     s_dragging = false;
     s_arc = s_stale_dot = s_name_lbl = NULL;
@@ -1967,7 +1915,6 @@ static bool on_knob(int detents)
     lv_arc_set_value(s_arc, nf);
     s_shown_f = nf;
     render_numeral(nf);
-    level_render(nf);
     segments_render(nf);
     position_handle(nf);
     anim_zoom_bump(s_temp_lbl);

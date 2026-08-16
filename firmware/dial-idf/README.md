@@ -192,8 +192,13 @@ itself:
   fatter. The stretch back to neutral stays lit so distance from centre is a
   length rather than arithmetic, level 0 keeps a quiet grey mark of its own so
   the ring reads bipolar at a glance, and a thin underline hugs whichever
-  segment the water is actually sitting under right now. Absolute mode is
-  unchanged — same arc, same handle, same water level.
+  segment the water is actually sitting under right now — while the side is
+  switched on. Off, that underline goes away with everything else that would
+  make the face look like it were still running. Absolute mode keeps the same
+  arc and the same handle, and reports the water in the WATER caption alone:
+  the wash that used to shade the arc between the setpoint and the measured
+  temperature has been removed, so the one mark on that band is the setting
+  you chose.
 - **Menu → Settings:** adjustment mode (Schedule/Hold — the default for what a
   dial-side change does), **Brightness** (its own sub-screen: separate Day,
   Night (in use), and Night (clock) levels, each a full-screen 0–100% picker
