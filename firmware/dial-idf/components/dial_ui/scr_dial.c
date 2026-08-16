@@ -74,6 +74,16 @@ static lv_obj_t *s_handle;       // setpoint drag handle — the ONLY temp touch
                                  // a step below the active wedge
 #define SEG_ZERO_OPA   LV_OPA_50 // neutral landmark, quieter than a real setting
 
+// The setpoint numeral's opacity on the relative face while the side is OFF.
+// Pitched at the ring's own rest tier (SEG_REST_OPA) so the numeral joins the
+// chassis rather than sitting above it: with the wedge back to its normal
+// stroke and the water underline gone, this is the last thing that could still
+// read as a live setting. It also has to lose decisively to the power button,
+// which keeps a full-strength ink_secondary ring and glyph while off — the
+// power button is the only thing worth touching on an off face, so it must be
+// the loudest, both at rest and when it breathes at a blocked adjustment.
+#define NUM_STANDBY_OPA LV_OPA_30
+
 // Where the bed actually IS: a thin underline hugging the segment it currently
 // sits under. The measurement never joins the segment band itself — those 21
 // stops are a scale of SETTINGS, and painting a degree reading into them would
@@ -685,20 +695,43 @@ static void apply_palette_and_state(const app_state_t *st)
     apply_identity(pal, night);
 
     // Water caption — display-only °C conversion when units_c (M4); the
-    // store keeps actual_c as-is either way.
+    // store keeps actual_c as-is either way. On the relative face it drops to
+    // the same rest tier as the numeral while the side is off: it is a live
+    // measurement, so leaving it at full strength would make it the brightest
+    // text on an off face and undo the rest of the quieting.
     lv_obj_set_style_text_color(s_water_lbl, pal->ink_secondary, 0);
-    lv_obj_set_style_text_opa(s_water_lbl, LV_OPA_80, 0);
+    lv_obj_set_style_text_opa(s_water_lbl,
+                              (s_rel && !z->on) ? NUM_STANDBY_OPA : LV_OPA_80, 0);
     char water[16];
     if (z->actual_c < 0) snprintf(water, sizeof(water), "WATER --");
     else if (st->units_c) snprintf(water, sizeof(water), "WATER %.1f\xC2\xB0", z->actual_c);
     else snprintf(water, sizeof(water), "WATER %d\xC2\xB0", dial_c_to_f(z->actual_c));
     lv_label_set_text(s_water_lbl, water);
 
-    // Setpoint numeral — ink_primary always (never state-tinted); dimmed only
-    // for OFFLINE (design-spec.md's "numeral whose color never lies").
+    // Setpoint numeral — ink_primary always (never state-tinted); dimmed for
+    // OFFLINE (design-spec.md's "numeral whose color never lies") and, on the
+    // relative face, for a side that is switched off.
+    //
+    // The level ring's numeral is the last thing on that face still at full
+    // strength once the wedge has dropped to its normal stroke and the water
+    // underline has gone: a bright "+2 LEVEL" over a dim ring still reads as a
+    // live setting being held. Dimming is the honest reading — the value is
+    // real and worth showing, it just isn't in effect. It is a dim, not a
+    // colour change, so the numeral still never lies about WHICH value it is.
+    //
+    // Absolute mode is deliberately left alone: nobody has reported the same
+    // confusion there, and its numeral carries a real temperature rather than
+    // a position on a ring that has just gone quiet around it.
+    lv_opa_t num_opa = (kind == ZK_OFFLINE) ? 115
+                     : (s_rel && !z->on)    ? NUM_STANDBY_OPA
+                                            : LV_OPA_COVER;
     lv_obj_set_style_text_color(s_temp_lbl, pal->ink_primary, 0);
-    lv_obj_set_style_text_opa(s_temp_lbl, (kind == ZK_OFFLINE) ? 115 : LV_OPA_COVER, 0);
+    lv_obj_set_style_text_opa(s_temp_lbl, num_opa, 0);
     lv_obj_set_style_text_color(s_unit_lbl, pal->ink_secondary, 0);
+    // The suffix rides with the numeral — they are one typographic unit, and a
+    // full-strength "LEVEL" beside a dimmed "+2" reads as a rendering fault
+    // rather than as a state.
+    lv_obj_set_style_text_opa(s_unit_lbl, num_opa, 0);
     // Relative mode has no unit — the suffix names the quantity instead (mirrors
     // scr_boost's "MIN"). The measured-water caption above keeps its degree, so
     // an absolute reference stays on the face in every mode.
