@@ -212,6 +212,40 @@ static void chevron_stop(void)
     lv_obj_set_style_opa(s_pill_glyph, LV_OPA_100, 0);
 }
 
+// Power-button hint: two slow breathes when something tries to change the
+// temperature while the zone is off. Same ping-pong ease_in_out vocabulary as
+// the chevron above, but finite — it answers one input rather than
+// advertising an ongoing state — and pointed at the control that unblocks
+// things instead of at the one that was just refused.
+static void power_hint_pulse(void)
+{
+    if (!s_power_btn) return;
+    // Already breathing: let it finish. Restarting per detent would pin the
+    // animation to its first frame for the whole of a spin.
+    if (lv_anim_get(s_power_btn, set_opa_cb)) return;
+    lv_obj_set_style_opa(s_power_btn, LV_OPA_COVER, 0);
+    lv_anim_t a;
+    lv_anim_init(&a);
+    lv_anim_set_var(&a, s_power_btn);
+    lv_anim_set_exec_cb(&a, set_opa_cb);
+    lv_anim_set_values(&a, LV_OPA_COVER, LV_OPA_40);
+    lv_anim_set_time(&a, 260);
+    lv_anim_set_playback_time(&a, 260);
+    lv_anim_set_repeat_count(&a, 2);
+    lv_anim_set_path_cb(&a, lv_anim_path_ease_in_out);
+    lv_anim_start(&a);
+}
+
+// The setpoint stays on screen while a zone is off (dimmed, as the rest of
+// the face is), which is exactly what made it read as adjustable in a dark
+// room. Every path that would move it asks this first.
+static bool zone_is_off(void)
+{
+    app_state_t st;
+    dial_state_get(&st);
+    return !st.zones[s_zone].on;
+}
+
 /* ---- water level: value step over the arc ------------------------------ */
 
 // Temperature -> degrees into the arc's own 0..270 sweep (rotation adds 135).
@@ -801,12 +835,21 @@ static void handle_event_cb(lv_event_t *e)
 
     if (code == LV_EVENT_PRESSED) {
         if (s_relief_active) return;      // handle is inert during a boost, like the knob
+        // ...and inert while the zone is off, for the same reason the knob is.
+        // Leaving s_dragging false makes PRESSING/RELEASED fall out at the
+        // guard below, so the wedge never moves and nothing is posted. Visual
+        // only here: the finger is already on the glass looking at the screen,
+        // so the power button's breathe is the whole message.
+        if (zone_is_off()) {
+            power_hint_pulse();
+            return;
+        }
         s_dragging = true;
         s_press_f = s_shown_f;
         dial_state_stamp_input();
         return;
     }
-    if (!s_dragging) return;              // a press that didn't start a drag (relief)
+    if (!s_dragging) return;              // a press that didn't start a drag (relief, or off)
 
     if (code == LV_EVENT_PRESSING) {
         lv_indev_t *indev = lv_indev_get_act();
@@ -1375,6 +1418,7 @@ static void destroy(void)
     if (s_num_box)    lv_anim_del(s_num_box, NULL);
     if (s_arc)        lv_anim_del(s_arc, NULL);
     if (s_pill_glyph) lv_anim_del(s_pill_glyph, NULL);
+    if (s_power_btn)  lv_anim_del(s_power_btn, NULL);
     if (s_stale_dot)  lv_anim_del(s_stale_dot, NULL);
     if (s_boost_timer) { lv_timer_del(s_boost_timer); s_boost_timer = NULL; }
 
@@ -1456,6 +1500,21 @@ static void on_state(const app_state_t *st)
 static bool on_knob(int detents)
 {
     if (!s_arc || s_shown_f < 0) return false;
+
+    // Powered off: the temperature is not adjustable, so nothing here moves
+    // the wedge, posts a setpoint, or arms a rail Boost. Turning used to do
+    // all three against a zone that isn't running — in the dark that reads as
+    // a working control that quietly does nothing. Consume the detent with
+    // the same soft stop pulse a range stop gives (this is the same "that
+    // input went nowhere" family) and breathe the power button so the eye
+    // lands on what unblocks it. clear_boost_arm() so an arm can't survive a
+    // power-off and confirm itself later.
+    if (zone_is_off()) {
+        clear_boost_arm();
+        power_hint_pulse();
+        dial_haptics_play_soft(HAPTIC_STOP);
+        return true;
+    }
 
     // A boost is a modal thing you started deliberately (owner decision): while
     // relief is active the knob is inert, so a stray detent can't rewrite the

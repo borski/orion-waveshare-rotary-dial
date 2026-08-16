@@ -164,7 +164,9 @@ itself:
   single bump, further turns stay quiet for about a second, and the next one
   after that confirms with a triple bump and starts the last-used Boost
   duration, defaulting to 15 minutes. Turn the opposite way, or simply stop,
-  to cancel arming.
+  to cancel arming. While a side is switched off none of this applies: the
+  knob and the arc handle won't move its setpoint or start a Boost, and the
+  power button breathes instead to point at what turns the side back on.
 - **Touch:** tap the power button on the dial screen to turn that side on/off;
   long-press it to open the Schedule/Hold picker. Tap the snowflake or flame
   icon sitting at either end of the temperature arc to start a timed boost
