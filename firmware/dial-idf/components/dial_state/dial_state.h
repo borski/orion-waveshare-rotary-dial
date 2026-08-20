@@ -780,3 +780,7 @@ typedef struct {
 
 void dial_cmd_post(const app_cmd_t *cmd);
 bool dial_cmd_receive(app_cmd_t *out, int timeout_ms);
+
+// Next queued command, left in place. For waits that can only act on some of
+// them -- see the note above the definition.
+bool dial_cmd_peek(app_cmd_t *out, int timeout_ms);

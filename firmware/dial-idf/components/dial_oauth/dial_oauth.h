@@ -73,6 +73,9 @@ bool dial_oauth_start_authorize(const oauth_disc_t *disc, const char *client_id,
 //     then exchange it for tokens (stored in NVS). Returns true on success.
 bool dial_oauth_finish_authorize(const oauth_disc_t *disc, const char *client_id,
                                  const char *redirect_uri, int timeout_ms);
+//  true once the browser has delivered the code, so the wait above can be split
+//  into slices the caller does other work between.
+bool dial_oauth_have_code(void);
 //  cleanup the callback server (call after finish, success or not).
 void dial_oauth_stop_authorize(void);
 

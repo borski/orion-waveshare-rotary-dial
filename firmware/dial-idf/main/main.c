@@ -108,6 +108,14 @@ static const char *TAG = "app";
 #define BACKOFF_MIN_S  5
 #define BACKOFF_MAX_S 60
 
+// How long the QR stays up waiting for consent before it's refreshed, and how
+// finely that wait is chopped. The slice is only a responsiveness knob — it
+// bounds how long a reboot command posted from the link screen waits to be
+// noticed, so it wants to be well under the ~300ms that reads as instant, and
+// costs one queue peek each time round.
+#define CONSENT_WINDOW_MS 300000
+#define CONSENT_SLICE_MS     250
+
 // Discovery + anonymous client registration are the steps that must complete
 // before the Orion-link QR can even be built (the authorize URL needs the
 // authorization_endpoint from discovery and the client_id from registration).
@@ -1366,12 +1374,78 @@ static bool orion_refresh_schedules(void)
 
 /* ---- worker supervisor ------------------------------------------------- */
 
+// Settings' three destructive actions: each erases some NVS state and reboots.
+// There's no follow-up state commit because esp_restart() never returns — which
+// is also what makes them the only commands a mid-wait worker can safely run
+// (see wait_servicing_reboots): they need no MCP session, and nothing after the
+// call site has to cope with having been interrupted.
+static void run_reboot_cmd(const app_cmd_t *cmd)
+{
+    switch (cmd->kind) {
+    case CMD_RELINK:
+        ESP_LOGW(TAG, "settings: re-link requested — clearing Orion tokens");
+        dial_oauth_forget();
+        esp_restart();
+        break;
+    case CMD_WIFI_RESET:
+        ESP_LOGW(TAG, "settings: change-network requested — rebooting into the setup portal");
+        dial_net_request_setup();
+        esp_restart();
+        break;
+    case CMD_FACTORY_RESET:
+        ESP_LOGW(TAG, "settings: factory reset requested — erasing NVS");
+        nvs_flash_erase();
+        esp_restart();
+        break;
+    default:
+        break;
+    }
+}
+
+static bool cmd_reboots(cmd_kind_t k)
+{
+    return k == CMD_RELINK || k == CMD_WIFI_RESET || k == CMD_FACTORY_RESET;
+}
+
+// Sleep `ms`, but honour a queued reboot command instead of sleeping through it.
+//
+// This task is the only thing that drains the command queue, and it only gets
+// round to it once it has a live MCP session. So every long wait before that
+// point — the OAuth consent window (five minutes) and the retry backoff — made
+// Settings' reboot actions look broken: the screen posted the command, said
+// "Restarting…", and then just sat there. Owner-reported against Change network
+// from the link screen, which the new Wi-Fi link there made easy to reach.
+//
+// Only the reboot trio is run here; anything else needs state this task hasn't
+// built yet and stays queued, untouched, for the normal drain. Hence peek
+// rather than receive — taking a command we can't run would reorder the queue,
+// and re-posting it would spin this loop for the rest of the wait.
+static void wait_servicing_reboots(int ms)
+{
+    int64_t end = esp_timer_get_time() + (int64_t)ms * 1000;
+    for (;;) {
+        int64_t left_ms = (end - esp_timer_get_time()) / 1000;
+        if (left_ms <= 0) return;
+        app_cmd_t cmd;
+        if (!dial_cmd_peek(&cmd, (int)left_ms)) return;   // window elapsed
+        if (!cmd_reboots(cmd.kind)) {
+            // Something we can't run is parked at the head and will stay there.
+            // Serve out the rest of the wait in one sleep rather than peeking
+            // at it again and again.
+            left_ms = (end - esp_timer_get_time()) / 1000;
+            if (left_ms > 0) vTaskDelay(pdMS_TO_TICKS(left_ms));
+            return;
+        }
+        run_reboot_cmd(&cmd);   // does not return
+    }
+}
+
 // Sleep `seconds` while publishing a countdown for the error screen.
 static void backoff_wait(int seconds)
 {
     for (int s = seconds; s > 0; s--) {
         dial_state_commit(mut_retry_in, &s);
-        vTaskDelay(pdMS_TO_TICKS(1000));
+        wait_servicing_reboots(1000);
     }
     int zero = 0;
     dial_state_commit(mut_retry_in, &zero);
@@ -1522,23 +1596,13 @@ static void handle_immediate_cmd(const app_cmd_t *cmd, const oauth_disc_t *disc,
         dial_power_inhibit(DPWR_INHIBIT_TASK, false);
         break;
     }
-    // Settings (M4) destructive actions: each erases some NVS state and
-    // reboots — there's no follow-up state commit because esp_restart()
-    // never returns.
+    // Settings (M4) destructive actions — see run_reboot_cmd. Shared with the
+    // long waits before this loop exists, so a "Restarting…" tap during setup
+    // or a retry backoff isn't stuck behind them.
     case CMD_RELINK:
-        ESP_LOGW(TAG, "settings: re-link requested — clearing Orion tokens");
-        dial_oauth_forget();
-        esp_restart();
-        break;
     case CMD_WIFI_RESET:
-        ESP_LOGW(TAG, "settings: change-network requested — rebooting into the setup portal");
-        dial_net_request_setup();
-        esp_restart();
-        break;
     case CMD_FACTORY_RESET:
-        ESP_LOGW(TAG, "settings: factory reset requested — erasing NVS");
-        nvs_flash_erase();
-        esp_restart();
+        run_reboot_cmd(cmd);
         break;
     // Software update (M6/M7), from SCR_UPDATE's "Check for updates" row.
     // Gated on clock_valid the same as the M6 auto-check above
@@ -1777,7 +1841,15 @@ static void worker_task(void *arg)
             }
             dial_state_commit(mut_oauth_url, url);
             dial_state_set_phase(PH_OAUTH_WAIT_CONSENT, NULL);
-            bool ok = dial_oauth_finish_authorize(&disc, client_id, redirect_uri, 300000);
+            // Wait out the consent window in slices, so a Change network /
+            // Re-link / Factory reset tapped from the link screen reboots now
+            // rather than in up to five minutes' time (wait_servicing_reboots).
+            // The exchange itself still runs in one go, once the code is in.
+            for (int waited = 0; waited < CONSENT_WINDOW_MS && !dial_oauth_have_code();
+                 waited += CONSENT_SLICE_MS)
+                wait_servicing_reboots(CONSENT_SLICE_MS);
+            bool ok = dial_oauth_have_code() &&
+                      dial_oauth_finish_authorize(&disc, client_id, redirect_uri, 0);
             dial_oauth_stop_authorize();
             if (!ok) {
                 ESP_LOGW(TAG, "consent window elapsed (%s) — restarting authorize",

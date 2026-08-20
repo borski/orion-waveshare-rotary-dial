@@ -547,6 +547,13 @@ bool dial_oauth_finish_authorize(const oauth_disc_t *disc, const char *client_id
     return ok;
 }
 
+// Has the browser come back with the code yet? Lets the caller wait for consent
+// in slices it can do other work between, instead of parking in the call above
+// for the whole window -- the worker task is the only thing that services the
+// command queue, so a five-minute park in here left Settings' reboot actions
+// looking dead. The wait above still handles the arrival itself.
+bool dial_oauth_have_code(void) { return s_got_code; }
+
 void dial_oauth_stop_authorize(void)
 {
     if (s_cb_httpd) { httpd_stop(s_cb_httpd); s_cb_httpd = NULL; }

@@ -741,6 +741,16 @@ bool dial_cmd_receive(app_cmd_t *out, int timeout_ms)
     return xQueueReceive(s_cmd_q, out, pdMS_TO_TICKS(timeout_ms)) == pdTRUE;
 }
 
+// Look at the next command without taking it. The worker's long waits (consent,
+// retry backoff) use this to spot the few commands they're allowed to run
+// mid-wait while leaving everything else queued for the normal drain -- taking
+// and re-posting instead would reorder the queue and spin the wait at 100% CPU
+// whenever a command it can't run is sitting at the head.
+bool dial_cmd_peek(app_cmd_t *out, int timeout_ms)
+{
+    return xQueuePeek(s_cmd_q, out, pdMS_TO_TICKS(timeout_ms)) == pdTRUE;
+}
+
 void dial_state_get(app_state_t *out)
 {
     xSemaphoreTake(s_mux, portMAX_DELAY);
