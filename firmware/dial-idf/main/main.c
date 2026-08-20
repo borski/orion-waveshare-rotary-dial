@@ -1849,8 +1849,17 @@ static void worker_task(void *arg)
                  waited += CONSENT_SLICE_MS)
                 wait_servicing_reboots(CONSENT_SLICE_MS);
             bool got = dial_oauth_have_code();
-            bool ok  = got && dial_oauth_finish_authorize(&disc, client_id, redirect_uri, 0);
+            // Shut the callback server down BEFORE the exchange, not after.
+            // It has done its whole job the moment the code lands, and it is
+            // not free while it lingers: httpd holds up to 7 sockets, the
+            // phone's browser leaves several of them open and keep-alive, and
+            // LWIP only has ten to give. The HTTPS POST that follows then
+            // could not get one — no DNS, no connect, "HTTP -1" with no status
+            // and no body, promptly, right after a consent that worked
+            // (owner-reported). Nothing below needs the server; the code and
+            // the PKCE verifier are already in hand.
             dial_oauth_stop_authorize();
+            bool ok = got && dial_oauth_finish_authorize(&disc, client_id, redirect_uri, 0);
             if (!ok) {
                 if (!got) {
                     // Nobody scanned in time. A fresh code is exactly the right
