@@ -1848,12 +1848,28 @@ static void worker_task(void *arg)
             for (int waited = 0; waited < CONSENT_WINDOW_MS && !dial_oauth_have_code();
                  waited += CONSENT_SLICE_MS)
                 wait_servicing_reboots(CONSENT_SLICE_MS);
-            bool ok = dial_oauth_have_code() &&
-                      dial_oauth_finish_authorize(&disc, client_id, redirect_uri, 0);
+            bool got = dial_oauth_have_code();
+            bool ok  = got && dial_oauth_finish_authorize(&disc, client_id, redirect_uri, 0);
             dial_oauth_stop_authorize();
             if (!ok) {
-                ESP_LOGW(TAG, "consent window elapsed (%s) — restarting authorize",
-                         dial_oauth_last_error());
+                if (!got) {
+                    // Nobody scanned in time. A fresh code is exactly the right
+                    // answer, and the QR screen is already saying what to do.
+                    ESP_LOGW(TAG, "consent window elapsed — new QR");
+                    continue;
+                }
+                // The phone consented, the code came back, and the exchange
+                // still failed. Painting a fresh QR at this point is the one
+                // thing that tells the owner nothing: they did their part, saw
+                // "Linking to Orion...", and got the code again with no reason
+                // given (owner-reported). Say what the token endpoint actually
+                // said and hold it long enough to read before re-arming.
+                const char *why = dial_oauth_last_error();
+                ESP_LOGE(TAG, "token exchange failed after consent: %s", why ? why : "(none)");
+                dial_state_set_phase(PH_DEGRADED, (why && *why) ? why
+                    : "Couldn't finish linking. The code will refresh — try again.");
+                backoff_wait(backoff_s);
+                backoff_s = (backoff_s * 2 > BACKOFF_MAX_S) ? BACKOFF_MAX_S : backoff_s * 2;
                 continue;
             }
         }
