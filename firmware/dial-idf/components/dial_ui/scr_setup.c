@@ -126,12 +126,18 @@ const ui_screen_t scr_wifi_portal = {
  * phone spinning forever with nothing on the dial explaining why (a real
  * field incident: an owner lost a long stretch to exactly this). Orion's
  * auth server doesn't support the device-authorization grant, so this LAN
- * dependency can't be engineered away — the fix is naming it, twice:
+ * dependency can't be engineered away — the fix is naming it, twice, and then
+ * giving the user something to do about it:
  *   1) a persistent one-line hint under the QR, always visible;
  *   2) if nothing has come back for a while, a specific, dismissible
  *      explainer restating it — for the very likely case that a user has
  *      simply not scanned yet, this must have a clear close state and must
  *      never permanently sit over the code.
+ *   3) that hint line is itself a link into Wi-Fi settings, because naming
+ *      the mismatch and then offering no way to fix it is only half an
+ *      answer — see oauth_wifi_cb. Reaching those settings at all also took
+ *      lifting nav_policy's outright pin on this phase (main.c), which is
+ *      what made this screen modal in the first place.
  */
 static lv_obj_t *s_oauth_card, *s_oauth_qr, *s_oauth_lbl, *s_oauth_hint_lbl;
 
@@ -202,6 +208,39 @@ static void oauth_wait_dismiss_cb(lv_event_t *e)
     oauth_arm_wait_timer(OAUTH_WAIT_REARM_MS);   // may reappear once, later — never right away
 }
 
+// The hint line is also the way OUT of a network mismatch. Everything on this
+// screen depends on the phone and the dial sharing a LAN, so the line that
+// names the network is exactly where a user realises they don't — and until
+// nav_policy stopped pinning this phase, realising it here led nowhere.
+// Tapping it opens Wi-Fi settings (status, IP, signal, change-network).
+//
+// Deliberately NOT mirrored onto the explainer sheet's copy, which names the
+// same network: the whole sheet is one big dismiss target ("tap anywhere"),
+// so a link inside it would be a tap that sometimes dismisses and sometimes
+// navigates depending on which word you hit.
+static void oauth_wifi_cb(lv_event_t *e)
+{
+    (void)e;
+    dial_haptics_play(HAPTIC_TICK);
+    ui_router_go(SCR_WIFI, NULL, LV_SCR_LOAD_ANIM_MOVE_LEFT);
+}
+
+// Swipe left to the menu — the same gesture that walks off the dial face, so
+// this screen stops being the one place in the UI where it does nothing. That
+// is where Re-link, Wi-Fi and software update live. RIGHT is left unconsumed
+// rather than faked: there is nothing to the right of this screen, exactly as
+// on the dial chain's leftmost face.
+//
+// Safe with the explainer up: the router calls lv_indev_wait_release() on a
+// consumed gesture, so a swipe that began on the sheet can't also fire its
+// dismiss CLICKED on finger-lift.
+static bool oauth_on_gesture(lv_dir_t dir)
+{
+    if (dir != LV_DIR_LEFT) return false;
+    ui_router_go(SCR_MENU, NULL, LV_SCR_LOAD_ANIM_MOVE_LEFT);
+    return true;
+}
+
 static void oauth_create(lv_obj_t *scr, void *arg)
 {
     (void)arg;
@@ -238,6 +277,21 @@ static void oauth_create(lv_obj_t *scr, void *arg)
     lv_obj_set_style_text_align(s_oauth_hint_lbl, LV_TEXT_ALIGN_CENTER, 0);
     lv_label_set_text(s_oauth_hint_lbl, "Scan with a phone on this Wi-Fi network");
     lv_obj_align(s_oauth_hint_lbl, LV_ALIGN_CENTER, 0, 138);
+    // Tappable -> SCR_WIFI. Underline rather than a brighter ink, so the line
+    // stays subordinate to the QR exactly as described above — the code is
+    // still the thing to look at. ext_click_area mirrors the value the dial's
+    // own tappable notice label uses; it reaches ~44px tall on a ~200px-wide
+    // line, short of this project's >=72px floor for the same reason that one
+    // documents (there is no room to grow here without crowding either the
+    // card above or the panel's rim below), and the same reason a button was
+    // not used instead. The 14px it does add upward runs under the card, which
+    // is explicitly non-clickable, so nothing is stolen from it; where the
+    // explainer sheet overlaps, the sheet is above this label in z-order and
+    // keeps its own tap-anywhere dismiss.
+    lv_obj_add_flag(s_oauth_hint_lbl, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_style_text_decor(s_oauth_hint_lbl, LV_TEXT_DECOR_UNDERLINE, 0);
+    lv_obj_set_ext_click_area(s_oauth_hint_lbl, 14);
+    lv_obj_add_event_cb(s_oauth_hint_lbl, oauth_wifi_cb, LV_EVENT_CLICKED, NULL);
 
     // Part 2: the dismissible explainer, hidden until its timer fires.
     s_wait_sheet = lv_obj_create(scr);
@@ -351,4 +405,5 @@ static void oauth_on_state(const app_state_t *st)
 
 const ui_screen_t scr_oauth_qr = {
     .create = oauth_create, .destroy = oauth_destroy, .on_state = oauth_on_state,
+    .on_gesture = oauth_on_gesture,
 };

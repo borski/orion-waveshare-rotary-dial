@@ -145,7 +145,10 @@ itself:
    automatically — nothing to type back in on the dial itself. If your phone
    is on a different network (e.g. still on cellular), the dial can't receive
    that callback and the QR will effectively hang; switch your phone to the
-   same Wi-Fi and rescan.
+   same Wi-Fi and rescan. The network name printed under the code is a link:
+   tap it to open Wi-Fi settings if it's the *dial* that's on the wrong
+   network. Swiping left opens the menu from here too, so Settings and
+   software update stay reachable before the dial is linked.
 4. **Pick a side.** On a dual-zone topper, the dial asks "Which side of the
    bed?" once, right after linking — tap the half of the screen for your
    side. (Skipped entirely on a single-zone topper — there's only one side to
@@ -253,7 +256,8 @@ itself:
   dial listens for the OAuth callback on its own LAN, so a phone on cellular
   data or a different network can approve the consent page but the dial will
   never see it land. Put your phone on the same network as the dial and scan
-  again.
+  again. The network name under the code says which one that is, and tapping
+  it opens Wi-Fi settings if the dial is the one that needs moving.
 - **The dial is stuck on "Connecting to Wi-Fi..." / "Orion unreachable."**
   These screens show the actual error and a retry countdown; the dial keeps
   retrying with backoff on its own. If it's stuck for more than a few

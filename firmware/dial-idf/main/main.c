@@ -255,7 +255,25 @@ static screen_id_t nav_policy(const app_state_t *st, void **arg)
         if (cur == SCR_NETPICK || cur == SCR_PASSKEY) return cur;
         return SCR_WIFI_PORTAL;
     }
-    case PH_OAUTH_WAIT_CONSENT: return SCR_OAUTH_QR;
+    case PH_OAUTH_WAIT_CONSENT: {
+        // Same "never trap the user" rule the no-device-state block below
+        // spells out, applied to the link step. This phase used to pin the QR
+        // outright, which made the link screen the one genuinely modal place
+        // in the UI — and the worst possible place for that, because the
+        // OAuth callback can only arrive over the dial's OWN LAN. "My phone
+        // is on the wrong network" and "this dial is on the wrong network"
+        // are the two likeliest reasons to be stuck staring at this code, and
+        // the second is fixed from SCR_WIFI, which was unreachable from here.
+        // A deliberately opened menu or sub-screen stays put; everything else
+        // still falls back to the QR, so swiping back off the menu returns to
+        // the code on the next tick with nothing to re-arm.
+        screen_id_t cur = ui_router_current();
+        if (cur == SCR_MENU || cur == SCR_SETTINGS || cur == SCR_ABOUT ||
+            cur == SCR_WIFI || cur == SCR_BRIGHTNESS ||
+            cur == SCR_BRIGHTNESS_MENU || cur == SCR_UPDATE)
+            return cur;
+        return SCR_OAUTH_QR;
+    }
     case PH_READY:
     case PH_DEGRADED:
     case PH_WIFI_LOST:
