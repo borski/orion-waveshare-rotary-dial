@@ -724,7 +724,14 @@ static void apply_palette_and_state(const app_state_t *st)
     lv_opa_t num_opa = (kind == ZK_OFFLINE) ? 115
                      : !z->on               ? NUM_STANDBY_OPA
                                             : LV_OPA_COVER;
-    lv_obj_set_style_text_color(s_temp_lbl, pal->ink_primary, 0);
+    //
+    // The one thing in that slot which ISN'T a numeral is the boost icon
+    // (render_numeral): it's a glyph, not a value, so "never state-tinted"
+    // doesn't bind it. It wears the same relief accent as the pill and the
+    // arc-end icon that started the boost, so the three read as one state
+    // instead of three unrelated marks.
+    bool boost_glyph = s_rel && relief;
+    lv_obj_set_style_text_color(s_temp_lbl, boost_glyph ? relief_accent : pal->ink_primary, 0);
     lv_obj_set_style_text_opa(s_temp_lbl, num_opa, 0);
     lv_obj_set_style_text_color(s_unit_lbl, pal->ink_secondary, 0);
     // The suffix rides with the numeral — they are one typographic unit, and a
@@ -736,6 +743,12 @@ static void apply_palette_and_state(const app_state_t *st)
     // an absolute reference stays on the face in every mode.
     if (st->rel_mode) lv_label_set_text(s_unit_lbl, "LEVEL");
     else              lv_label_set_text(s_unit_lbl, st->units_c ? "\xC2\xB0" "C" : "\xC2\xB0" "F");
+    // "LEVEL" names the quantity the numeral is showing, and the boost icon
+    // isn't one — left up, the suffix would be captioning a flame. It rides
+    // with the numeral (see above), so it leaves with it and returns when the
+    // boost ends.
+    if (boost_glyph) lv_obj_add_flag(s_unit_lbl, LV_OBJ_FLAG_HIDDEN);
+    else             lv_obj_clear_flag(s_unit_lbl, LV_OBJ_FLAG_HIDDEN);
 
     // Setpoint handle: themed to the live accent and parked at the setpoint.
     // Left alone while the user is dragging it — they own s_shown_f then, and a
@@ -1046,6 +1059,22 @@ static void apply_palette_and_state(const app_state_t *st)
 // keeps °F, or a one-decimal °C conversion when s_units_c (M4).
 static void render_numeral(int temp_f)
 {
+    // A running boost owns the hero slot on the relative face. The setpoint is
+    // pinned to a rail for the duration and the knob is inert, so "+10"/"-10"
+    // is a number the user can neither change nor learn anything from — it
+    // reads as an extreme setting someone dialled in rather than as relief that
+    // will expire on its own. The flame/snow3 that started the boost says what
+    // is actually happening, and dial_font_icons_64 puts it at the numeral's
+    // own optical size (64px ~= this face's 65px digit height).
+    //
+    // Absolute mode deliberately keeps its number: there the setpoint is a real
+    // temperature the user still wants to read, not a rail.
+    if (s_rel && s_relief_active) {
+        lv_obj_set_style_text_font(s_temp_lbl, &dial_font_icons_64, 0);
+        lv_label_set_text(s_temp_lbl, s_relief_heat ? DIAL_ICON_FLAME : DIAL_ICON_SNOW3);
+        return;
+    }
+    lv_obj_set_style_text_font(s_temp_lbl, &dial_font_num_88, 0);
     char t[8];
     if (s_rel) {
         int lvl = dial_rel_from_f(temp_f);
