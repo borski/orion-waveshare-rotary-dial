@@ -1033,6 +1033,14 @@ static void apply_palette_and_state(const app_state_t *st)
     // Dial - Menu on a single-zone one, re-centered so the pair sits
     // symmetric. Filled = the face this screen instance is showing; scr_dial
     // is never the menu face, so that dot always tracks.
+    //
+    // The partner dot stays put while this side is on, even though on_gesture
+    // won't walk to it then. That looks like a violation of
+    // dial_dots_layout's "no dot for a face the swipe can't reach" rule, but
+    // the rule is about TOPOLOGY — a single-zone topper has no partner, ever.
+    // A locked-out side still has one; it's a momentary lockout, not a
+    // different bed. Dropping the dot would re-center the row on every power
+    // tap, which is visible jitter, and would claim the topper changed shape.
     dial_dots_layout(st, s_dot_b, s_dot_a, s_dot_menu);
     lv_obj_set_style_bg_color(s_dot_b, s_zone == ZONE_B ? pal->ink_secondary : pal->track, 0);
     lv_obj_set_style_bg_color(s_dot_a, s_zone == ZONE_A ? pal->ink_secondary : pal->track, 0);
@@ -2069,6 +2077,9 @@ static bool on_knob(int detents)
 // buttons and power disc, not a swipe on the dial itself (see
 // boost_btn_event_cb / power_long_press_cb) — up/down are simply unhandled
 // here now that the router forwards all four directions.
+//
+// One exception to the chain, below: while THIS side is on, the partner face
+// drops out of it and only the menu step survives.
 static bool on_gesture(lv_dir_t dir)
 {
     if (dir != LV_DIR_LEFT && dir != LV_DIR_RIGHT) return false;
@@ -2079,7 +2090,24 @@ static bool on_gesture(lv_dir_t dir)
 
     app_state_t st;
     dial_state_get(&st);
-    bool dual = dial_state_is_dual(&st);
+    // A side that is ON stops offering its partner. A side is on because
+    // someone is sleeping on it, and the expensive mistake in the dark is
+    // sliding one face over and adjusting the OTHER half of the bed — silent,
+    // plausible, and it lands on a person who is asleep and didn't ask. An off
+    // side has no such cost, so it keeps the full chain: that is the state you
+    // are in when setting the bed up, and moving between sides is the point.
+    //
+    // Implemented by collapsing the chain rather than special-casing each
+    // swipe: while on, this face behaves exactly like the single-zone
+    // topper's, which is a shape the rest of this function already knows how
+    // to walk. Left reaches the menu (from either side, skipping the partner
+    // it would normally pass through — the alternative would strand ZONE_B
+    // with no route to settings at all), right has nowhere to go. Settings is
+    // always reachable either way; it is a destination you have to read to
+    // use, so arriving there by accident costs a swipe back, not a sleeping
+    // partner's night. Neither path touches ui_zone, so the menu's swipe-back
+    // still returns here.
+    bool dual = dial_state_is_dual(&st) && !st.zones[s_zone].on;
 
     if (dir == LV_DIR_LEFT) {
         if (dual && s_zone == ZONE_B) {
