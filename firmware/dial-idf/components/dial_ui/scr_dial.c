@@ -202,6 +202,32 @@ static int64_t s_relief_cancel_us;
 static int s_boost_arm_dir;
 static int64_t s_boost_arm_us;
 
+// Where the turn that walked into the rail STARTED. Every detent that moves the
+// setpoint commits it (on_knob's post_temp), so a spin from level -2 down to the
+// -10 rail writes -3,-4,...,-10 on the way past. Those are transitional marks —
+// the user was travelling, not choosing — but the last of them is what the bed
+// (and then start_thermal_relief's own "previous_temp") is holding at the
+// instant a rail-push boost fires, which is why cancelling a boost used to drop
+// the side at -10 instead of putting it back where it was.
+//
+// -1 = nothing to restore: either the run never reached a rail, or the setpoint
+// was ALREADY parked there before the gesture began, in which case the rail is
+// a genuine settled choice and must not be second-guessed. Belongs to the arm's
+// lifecycle, so clear_boost_arm() drops it.
+static int     s_rail_from_f = -1;
+static int64_t s_rail_from_us;
+// Detents closer together than this are one continuous turn; a longer pause
+// means the user stopped, so wherever they stopped is settled and becomes the
+// origin of the next run.
+#define KNOB_RUN_GAP_MS 900
+// ...and a rail reached longer ago than this stopped being somewhere the user
+// was passing through. Generous next to the ~1-2s arm/confirm gesture, short
+// enough that a rail left sitting for a while reverts to being a real setpoint.
+#define RAIL_FROM_TTL_MS 10000
+static int     s_run_from_f = -1;   // setpoint before the current run of detents
+static int     s_run_dir;
+static int64_t s_run_last_us;
+
 // Current configured arc range (°F). Absolute mode keeps the shipped 55–110;
 // relative mode widens to 50–113 so all 21 levels are reachable (owner: widen
 // only in relative mode, so an existing °F user's arc never moves). -1 forces
@@ -1102,11 +1128,21 @@ static void clear_boost_arm(void)
 {
     s_boost_arm_dir = 0;
     s_boost_arm_us = 0;
+    s_rail_from_f = -1;
 }
 
 static void start_rail_boost(zone_idx_t zone, bool heat)
 {
     uint8_t minutes = dial_state_get_boost_minutes();
+    // Put the settled setpoint back before the boost starts. The queue keeps
+    // the order (the worker's drain coalesces temps, then handles the boost as
+    // the pending command behind them), so this write lands first and
+    // start_thermal_relief records THIS as previous_temp — which is what the
+    // server hands back, and what cancelling restores. Without it the boost
+    // captures the rail the gesture just walked across.
+    if (s_rail_from_f >= 0 &&
+        esp_timer_get_time() - s_rail_from_us <= (int64_t)RAIL_FROM_TTL_MS * 1000)
+        post_temp_for(zone, s_rail_from_f);
     if (zone == s_zone) s_shown_f = heat ? s_arc_max : s_arc_min;
     clear_boost_arm();
     dial_state_set_relief_optimistic(zone, true, heat,
@@ -1978,6 +2014,18 @@ static bool on_knob(int detents)
         return true;
     }
 
+    // Track where this continuous turn began, before the detent below moves
+    // the setpoint off it — that origin is the settled value a rail-push boost
+    // has to restore (see s_rail_from_f).
+    {
+        int dir = detents > 0 ? 1 : -1;
+        int64_t now = esp_timer_get_time();
+        if (dir != s_run_dir || now - s_run_last_us > (int64_t)KNOB_RUN_GAP_MS * 1000)
+            s_run_from_f = s_shown_f;
+        s_run_dir = dir;
+        s_run_last_us = now;
+    }
+
     lv_arc_set_value(s_arc, nf);
     s_shown_f = nf;
     render_numeral(nf);
@@ -1992,8 +2040,19 @@ static bool on_knob(int detents)
     // than requiring a wasted detent to first pin against the stop.
     post_temp(nf);
     if (nf <= s_arc_min && detents < 0) {
+        // Arrived at the rail under power — remember where the run started so
+        // a boost confirmed from here can put it back. Set BEFORE arming,
+        // since a re-arm inside the confirm window fires the boost from here.
+        if (s_run_from_f != nf) {
+            s_rail_from_f = s_run_from_f;
+            s_rail_from_us = esp_timer_get_time();
+        }
         handle_rail_boost_arm(-1);
     } else if (nf >= s_arc_max && detents > 0) {
+        if (s_run_from_f != nf) {
+            s_rail_from_f = s_run_from_f;
+            s_rail_from_us = esp_timer_get_time();
+        }
         handle_rail_boost_arm(1);
     } else {
         clear_boost_arm();

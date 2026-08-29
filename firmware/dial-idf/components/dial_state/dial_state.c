@@ -447,7 +447,16 @@ void dial_state_set_relief_optimistic(int zone, bool active, bool heat, int64_t 
             // restored that stale value — switching a bed that was ON to OFF.
             // Doing it here covers BOTH callers, the LVGL task and the worker.
             s_state.zones[z].relief_prev_on     = s_state.zones[z].on;
-            s_state.zones[z].relief_prev_temp_c = s_state.zones[z].temp_c;
+            // Prefer the pending optimistic target over the setpoint the device
+            // has been told about so far, the same way predict_thermal does:
+            // a rail-push boost restores the settled setpoint (scr_dial's
+            // s_rail_from_f) by posting it immediately before the boost, so at
+            // this instant that write is still in flight and temp_c is the rail
+            // the gesture walked across. Capturing temp_c here would undo the
+            // restore for anyone who cancels before the server's ack lands.
+            s_state.zones[z].relief_prev_temp_c =
+                (s_state.ui_temp_f[z] >= 0) ? dial_f_to_c(s_state.ui_temp_f[z])
+                                            : s_state.zones[z].temp_c;
         }
         if (!active && s_state.zones[z].relief_active) {
             // Cancelling restores what the relief displaced. Without this the

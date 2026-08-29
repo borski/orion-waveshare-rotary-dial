@@ -1545,7 +1545,13 @@ static void handle_immediate_cmd(const app_cmd_t *cmd, const oauth_disc_t *disc,
         relief_optimistic_t opt = {
             .zone = cmd->zone, .active = true, .heat = b.heat,
             .end_ms = (int64_t)time(NULL) * 1000 + (int64_t)b.minutes * 60000,
-            .prev_temp_c = pre.zones[cmd->zone].temp_c,
+            // Same "prefer the pending optimistic target" rule as
+            // dial_state_set_relief_optimistic — see its comment. The rail-push
+            // restore is queued just ahead of this command, so temp_c can still
+            // be the rail the gesture crossed.
+            .prev_temp_c = (pre.ui_temp_f[cmd->zone] >= 0)
+                               ? dial_f_to_c(pre.ui_temp_f[cmd->zone])
+                               : pre.zones[cmd->zone].temp_c,
             .optimistic = true,
         };
         dial_state_commit(mut_relief_optimistic, &opt);
