@@ -86,6 +86,12 @@ static const char *TAG = "app";
 // Sleep schedules (M5) don't change minute to minute — refresh far less
 // often than device state, piggybacked on the same idle poll path.
 #define SCHED_INTERVAL_US (30LL * 60 * 1000000)   // ~30 min
+// A refresh that misses — no synced clock yet, or a failed call — re-tries on
+// this much shorter cadence instead of costing a full interval. The FIRST
+// fetch after a boot is the one that matters: until it lands, sched_valid is
+// false and temp_write_phase(), the night window and the pill's hold/until
+// grammar all take their "no schedule" branch.
+#define SCHED_RETRY_US (60LL * 1000000)           // ~1 min
 
 // Auto OTA check (M6): once per uptime-day, and only checks (never applies)
 // — see the gating comment at its call site for the full safe-window rule.
@@ -1941,7 +1947,21 @@ static void worker_task(void *arg)
     // ---- steady state: drain commands (coalescing per zone), gated poll ----
     int64_t last_poll_us      = esp_timer_get_time();
     int     poll_confirms     = 0;   // fast reads still owed after a write
-    int64_t last_sched_us     = esp_timer_get_time();
+    // Schedules are wanted as soon as the worker is up, NOT SCHED_INTERVAL_US
+    // after it. Seeding the timer with "now" (as this did) meant the first
+    // fetch landed ~30 min after every boot, and until it does sched_valid is
+    // false for both zones — so temp_write_phase() returns SLEEP_PHASE_NONE and
+    // a knob turn in Follow-schedule mode silently falls back to a plain
+    // set_zone hold instead of retargeting the phase that is actually running.
+    // The schedule engine then overwrites that hold at the next boundary, which
+    // is the reported "the dial goes back to the schedule temperature after a
+    // reflash". The night window and the pill's hold/until grammar read the
+    // same flag, so both also mis-report during that window.
+    //
+    // A deadline of 0 fetches on the first idle poll instead; a miss re-arms at
+    // SCHED_RETRY_US because orion_refresh_schedules needs a synced clock to
+    // know which weekday "tonight" is, and SNTP often hasn't landed by then.
+    int64_t sched_due_us      = 0;
     int64_t last_ota_check_us = esp_timer_get_time();   // first auto-check ~24h after boot
     int poll_failures = 0;
     for (;;) {
@@ -2285,10 +2305,12 @@ static void worker_task(void *arg)
         last_poll_us = esp_timer_get_time();
 
         // Sleep schedules change far less often than device state — piggyback
-        // on this same quiet-idle gate, just at a much longer interval.
-        if (esp_timer_get_time() - last_sched_us >= SCHED_INTERVAL_US) {
-            with_auth_retry(sched_call, NULL, &disc, client_id);   // commits inside on success
-            last_sched_us = esp_timer_get_time();
+        // on this same quiet-idle gate, just at a much longer interval. The
+        // deadline only jumps a full interval once a fetch actually succeeds
+        // (see sched_due_us above).
+        if (esp_timer_get_time() >= sched_due_us) {
+            bool got = with_auth_retry(sched_call, NULL, &disc, client_id);   // commits inside on success
+            sched_due_us = esp_timer_get_time() + (got ? SCHED_INTERVAL_US : SCHED_RETRY_US);
         }
 
         // OTA_FAILED must not be terminal (field bug: it used to stay wedged
