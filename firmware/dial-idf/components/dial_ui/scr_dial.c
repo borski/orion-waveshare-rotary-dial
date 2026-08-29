@@ -24,6 +24,14 @@ LV_FONT_DECLARE(dial_font_num_88)
 #define ARC_R 165
 #define BOOST_CONFIRM_MIN_MS 1000
 #define BOOST_CONFIRM_MAX_MS 2100
+// How long the setpoint is held still after a boost is cancelled. The cancel
+// is itself a turn, and a hand that has just rotated hard enough to confirm
+// one rarely stops on the exact detent that did it — without this, the tail of
+// that same gesture walks straight off the restored temperature, so the value
+// the cancel just brought back is visible for a few milliseconds and then
+// gone. A second is long enough for the restore to land and be read, short
+// enough that a deliberate follow-up adjustment doesn't feel blocked.
+#define BOOST_SETTLE_MS 1000
 
 static lv_obj_t *s_arc;
 static lv_obj_t *s_stale_dot;
@@ -199,6 +207,9 @@ static bool s_rel;
 static bool s_relief_active;
 static bool s_relief_heat;
 static int64_t s_relief_cancel_us;
+// When the last boost cancel fired; starts the BOOST_SETTLE_MS window during
+// which detents are swallowed. 0 = no window pending.
+static int64_t s_boost_settle_us;
 static int s_boost_arm_dir;
 static int64_t s_boost_arm_us;
 
@@ -1162,6 +1173,9 @@ static void start_rail_boost(zone_idx_t zone, bool heat)
 
 static void cancel_boost(void)
 {
+    // Open the settle window before the state change, so the very next detent
+    // of the gesture that cancelled sees it (see BOOST_SETTLE_MS).
+    s_boost_settle_us = esp_timer_get_time();
     dial_state_set_relief_optimistic(-1, false, false, 0);
     app_cmd_t cmd = { .kind = CMD_BOOST_CANCEL };
     dial_cmd_post(&cmd);
@@ -1864,6 +1878,7 @@ static void destroy(void)
     s_seg_tick = NULL;
     s_seg_lit_opa = LV_OPA_COVER;
     s_seg_zone_on = true;
+    s_boost_settle_us = 0;
     s_handle = NULL;
     s_dragging = false;
     s_arc = s_stale_dot = s_name_lbl = NULL;
@@ -1991,6 +2006,27 @@ static bool on_knob(int detents)
         clear_boost_arm();
         dial_haptics_play_soft(HAPTIC_STOP);
         return true;
+    }
+
+    // The tail of the cancelling turn. Reaching here means relief is already
+    // off, so without this the remaining detents of that same gesture would be
+    // ordinary setpoint moves and would walk off the temperature the cancel
+    // just restored — the restore would flash up and immediately be overwritten
+    // by the hand that asked for it. Swallow them for BOOST_SETTLE_MS, with the
+    // same soft stop cue every other "that input went nowhere" path uses.
+    //
+    // Deliberately not refreshed per detent: this is a fixed window from the
+    // cancel, not an idle timeout, so leaning on the knob can't extend it
+    // indefinitely. Run tracking is left alone too — s_run_last_us is older
+    // than the whole boost by now, so the first detent after the window opens
+    // a fresh run from the restored value, which is exactly the origin a
+    // subsequent rail-push boost should restore.
+    if (s_boost_settle_us) {
+        if (esp_timer_get_time() - s_boost_settle_us < (int64_t)BOOST_SETTLE_MS * 1000) {
+            dial_haptics_play_soft(HAPTIC_STOP);
+            return true;
+        }
+        s_boost_settle_us = 0;
     }
 
     // Relative: one detent = exactly one level in the turned direction, from
