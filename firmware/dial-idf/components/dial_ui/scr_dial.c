@@ -24,8 +24,103 @@ LV_FONT_DECLARE(dial_font_num_88)
 
 static lv_obj_t *s_arc;
 static lv_obj_t *s_stale_dot;
-static lv_obj_t *s_zero_notch;   // neutral (level 0) landmark, relative mode only
 static lv_obj_t *s_handle;       // setpoint drag handle — the ONLY temp touch target
+
+/*
+ * LEVEL RING — the relative scale's own ring (owner-approved design).
+ *
+ * Relative mode used to change only the numeral: the ring stayed a continuous
+ * sweep, which is an honest picture of °F and a dishonest one of levels. The
+ * level scale is not continuous — it is 21 named stops with non-linear °F
+ * carriers behind them — so the ring is now 21 discrete segments, one per
+ * level, and the whole face reads as a stepped instrument rather than a slider
+ * that happens to print integers.
+ *
+ * Three things fall out of that, and they are the point of the design:
+ *   - The ring carries the scale's own colour ramp — cool at −10, through
+ *     neutral at 0, to heat at +10 — so the chassis is the legend and the
+ *     active wedge introduces no new colour, it just turns one up.
+ *   - The active segment is fattened (16 -> 22px), which is what makes the
+ *     setting legible across a dark bedroom without reading the numeral.
+ *   - The stretch between neutral and the active level is lit, so "how far
+ *     from neutral am I" is a length, not arithmetic.
+ *   - Level 0 keeps its own quiet mark, so the ring is bipolar at a glance.
+ *   - A neutral underline on an inner band hugs the segment the bed is
+ *     actually sitting under, so "how far has it got" is answered in the same
+ *     vocabulary as "where did I set it".
+ *
+ * ABSOLUTE MODE IS UNTOUCHED — segments hidden, the continuous arc and its
+ * water overlay restored exactly as they shipped. This is an alternate
+ * presentation of the same setpoint, not a replacement for it.
+ *
+ * 21 lv_arc objects rather than a canvas or a custom draw callback: it needs no
+ * pixel buffer, it is restyled with the same lv_obj_set_style_* vocabulary as
+ * everything else on this face (so night swaps and opacity tiers work the way
+ * they do everywhere), and each segment stays an addressable object we can
+ * simply re-colour. They are created once and restyled per render — never
+ * created or deleted in the render path.
+ */
+#define SEG_N        21          // levels −10…+10
+#define SEG_W        16          // inactive stroke — the arc's own band width
+#define SEG_W_ACTIVE 22          // active stroke: same centreline, fatter both ways
+#define SEG_R        157         // band CENTRELINE, not ARC_R — see the boost-icon
+                                 // comment in create() for the pixel measurement
+#define SEG_REST_OPA   LV_OPA_30 // the un-set part of the scale: present as a
+                                 // legend, never competing with the setting
+#define SEG_TRAIL_OPA  LV_OPA_70 // neutral -> setting, clearly "lit" but still
+                                 // a step below the active wedge
+#define SEG_ZERO_OPA   LV_OPA_50 // neutral landmark, quieter than a real setting
+
+// Where the bed actually IS: a thin underline hugging the segment it currently
+// sits under. The measurement never joins the segment band itself — those 21
+// stops are a scale of SETTINGS, and painting a degree reading into them would
+// be answering a question the ring isn't asking.
+//
+// r=141 with a 4px stroke puts its outer edge at 143, clearing the ACTIVE
+// wedge's inner edge (157 − 22/2 = 146) by 3px. That clearance is the number
+// that matters: it is measured against the fattened segment, not the resting
+// one, so the underline never collides even when the bed and the setpoint are
+// on the same stop — which is exactly when you most want to see them meet.
+#define SEG_TICK_R    141
+#define SEG_TICK_W      4
+#define SEG_TICK_OPA  LV_OPA_60
+
+static lv_obj_t *s_seg[SEG_N];
+static lv_obj_t *s_seg_tick;
+
+/*
+ * Segment i's start and end angle within the arc's own 0..270 sweep.
+ *
+ * The ideal split is a 1.0° gap and a (270 − 20×1.0)/21 = 11.905° segment, and
+ * LVGL 8.4 cannot draw it: lv_arc_set_angles takes whole degrees. Rounding the
+ * 12.905° pitch directly makes the GAPS land on 0°, 1° or 2° — a 0° gap fuses
+ * two segments into a blob and a 2° gap opens a hole, so the ring's rhythm
+ * visibly stumbles in a couple of places.
+ *
+ * So the rounding error is pushed into the segment LENGTH instead, where the
+ * eye cannot find it: boundaries at round(i × 270/21), each segment stopping
+ * 1° short of the next boundary. Gaps are then exactly 1.0° everywhere and
+ * segments come out 11° or 12° — a 2.7px difference on a ~33px arc at r=157,
+ * against the 0–2° gap variation (0px to 5.5px of dark) the naive rounding
+ * would have produced.
+ */
+static void seg_bounds(int i, uint16_t *a0, uint16_t *a1)
+{
+    int start = (int)lroundf(i * 270.0f / SEG_N);
+    int next  = (int)lroundf((i + 1) * 270.0f / SEG_N);
+    *a0 = (uint16_t)start;
+    *a1 = (uint16_t)(next - 1);          // the 1° gap, taken off this segment's tail
+}
+
+// Centre of segment i, in the same 0..270 sweep — where the setpoint handle
+// parks in relative mode (see position_handle) so handle and lit segment can
+// never disagree.
+static float seg_center(int i)
+{
+    uint16_t a0, a1;
+    seg_bounds(i, &a0, &a1);
+    return (a0 + a1) / 2.0f;
+}
 
 /*
  * Water level, drawn as a VALUE STEP rather than a texture: no stripes, no
@@ -242,6 +337,16 @@ static void configure_arc_range(const app_state_t *st)
 // The arc sweeps 270° starting at 135° (lower-left), clockwise over the top to
 // 45° (lower-right); the remaining 90° at the bottom is the gap. Both helpers
 // share that mapping so the handle rides exactly on the fill's leading edge.
+//
+// Both are ALSO mode-dependent, and they have to be. Absolute mode maps °F
+// linearly onto the sweep. Relative mode cannot: the level carriers are
+// non-linear in °F (50, 54, 57, 61, … — see DIAL_REL_F), so a level's linear
+// angle and its segment's own centre disagree by up to 6.4° — measured worst
+// case at levels −10, +4, +5 and +10, which is ~17px on this ring, half a
+// segment wide. The handle would sit in a gap while a DIFFERENT segment was
+// lit: the single worst thing a stepped instrument can do. So in relative mode
+// both directions of the mapping run on segment geometry instead, and the
+// handle is exactly on the lit segment by construction rather than by luck.
 
 // Place the handle centered ON the arc band (not on its outer edge). LVGL draws
 // its own knob at the band centerline = (inner span)/2 − indic_width/2; we mirror
@@ -255,10 +360,16 @@ static void position_handle(int f)
                       - lv_obj_get_style_pad_right(s_arc, LV_PART_MAIN);
     float r = (span > 0 ? span : 2 * ARC_R) / 2.0f
               - lv_obj_get_style_arc_width(s_arc, LV_PART_INDICATOR) / 2.0f;
-    float frac = (float)(f - s_arc_min) / (float)(s_arc_max - s_arc_min);
-    if (frac < 0.0f) frac = 0.0f;
-    if (frac > 1.0f) frac = 1.0f;
-    float ang = (135.0f + frac * 270.0f) * (float)M_PI / 180.0f;
+    float sweep;
+    if (s_rel) {
+        sweep = seg_center(dial_rel_from_f(f) - DIAL_REL_MIN);
+    } else {
+        float frac = (float)(f - s_arc_min) / (float)(s_arc_max - s_arc_min);
+        if (frac < 0.0f) frac = 0.0f;
+        if (frac > 1.0f) frac = 1.0f;
+        sweep = frac * 270.0f;
+    }
+    float ang = (135.0f + sweep) * (float)M_PI / 180.0f;
     int dx = (int)lroundf(r * cosf(ang));
     int dy = (int)lroundf(r * sinf(ang));
     lv_obj_align(s_handle, LV_ALIGN_CENTER, dx, dy);
@@ -274,6 +385,17 @@ static int value_from_point(lv_point_t p)
     float sweep = theta - 135.0f;                   // 0 at the arc's start
     if (sweep < 0.0f) sweep += 360.0f;
     if (sweep > 270.0f) sweep = (sweep > 315.0f) ? 0.0f : 270.0f;   // gap -> nearer rail
+    if (s_rel) {
+        // Whichever segment the finger is actually over — the drag becomes a
+        // 21-stop selector that steps in time with the ring instead of gliding
+        // between its stops. The release-time snap in handle_event_cb is then
+        // a no-op, which is the correct kind of redundancy: it stays honest if
+        // this ever goes back to a continuous drag.
+        int i = (int)(sweep / (270.0f / SEG_N));
+        if (i < 0) i = 0;
+        if (i > SEG_N - 1) i = SEG_N - 1;
+        return dial_rel_to_f(i + DIAL_REL_MIN);
+    }
     float frac = sweep / 270.0f;
     return s_arc_min + (int)lroundf(frac * (float)(s_arc_max - s_arc_min));
 }
@@ -281,7 +403,12 @@ static int value_from_point(lv_point_t p)
 static void level_render(int target_f)
 {
     if (!s_level) return;
-    if (s_actual_f < 0) {                       // no measurement yet
+    // Relative mode draws the water nowhere: the level ring's segments are a
+    // scale of settings, not of degrees, so a continuous water boundary laid
+    // over them would be measuring one thing against another. The measurement
+    // is not lost — it gets the inner underline (seg_tick_render) plus the WATER
+    // caption, which keeps its degree sign in every mode.
+    if (s_rel || s_actual_f < 0) {              // no measurement yet
         lv_obj_add_flag(s_level, LV_OBJ_FLAG_HIDDEN);
         return;
     }
@@ -301,6 +428,159 @@ static void level_render(int target_f)
     lv_obj_set_style_arc_opa(s_level, cooling ? LEVEL_OPA_OVER : LEVEL_OPA_UNDER, LV_PART_INDICATOR);
     lv_arc_set_angles(s_level, a0, a1);
     lv_obj_clear_flag(s_level, LV_OBJ_FLAG_HIDDEN);
+}
+
+/* ---- level ring: the 21 segments -------------------------------------- */
+
+// The ring's own colour ramp: accent_cool at level −10, through
+// neutral_holding at 0, to accent_heat at +10 (owner: "the wedge staying true
+// to the ring colours, just intense and larger" — the ring reads red-to-blue).
+//
+// This makes the chassis itself the legend. Every segment is permanently the
+// colour of the setting it stands for, so the ring says what the whole scale
+// MEANS even at rest, and the active wedge then has nothing to introduce — it
+// is the same hue you were already looking at, turned up and thickened. A
+// single accent parachuted onto a grey track has to be decoded ("orange means
+// warm, and it's over there"); a ramp is just read.
+//
+// Mixed from the live table on every call, never cached: the night swap
+// replaces both endpoints (accent_cool goes dim khaki after dark), and the
+// ramp has to swap with them.
+//
+// The ramp deliberately stops SHORT of neutral: it travels at most 45% of the
+// way to neutral_holding, so even ±1 still has an unmistakable hue. Measured
+// on the simulator's own render, a ramp that went the whole way made the
+// active wedge at +2 come out (115,113,90) — a dull olive with nothing left to
+// intensify, at exactly the settings people actually use. The ring still reads
+// as cool-to-warm across its span; it just never spends its colour before it
+// reaches the middle, which is where the instrument has to work hardest.
+#define SEG_RAMP_TO_NEUTRAL 115   // of 255: the most neutral any level may get
+static lv_color_t seg_ramp(int level, const dial_palette_t *pal)
+{
+    if (level == 0) return pal->neutral_holding;
+    int mag = (level < 0) ? -level : level;
+    uint8_t t = (uint8_t)(255 - SEG_RAMP_TO_NEUTRAL * (10 - mag) / 10);
+    // lv_color_mix(a, b, t): t=255 is all a, so t rises toward the rails.
+    return lv_color_mix(level < 0 ? pal->accent_cool : pal->accent_heat,
+                        pal->neutral_holding, t);
+}
+
+// How loud a LIT segment is allowed to be, mirroring the arc indicator's own
+// state tiers (see apply_palette_and_state): COVER normally, LV_OPA_30 for a
+// standby zone, transparent when offline. Cached like s_level_accent because
+// the drag and detent paths re-render without a fresh state snapshot.
+static lv_opa_t s_seg_lit_opa = LV_OPA_COVER;
+
+// Which segment the bed is currently sitting under. This DOES round the
+// measurement onto the ring's 21 stops, which the earlier free-floating tick
+// deliberately avoided — it is the cost of an underline that hugs its segment,
+// because a mark stranded between two stops has nothing to hug and reads as a
+// third free-standing object on an already busy ring.
+//
+// The rounding is worth it because it is the SAME rounding dial_rel_from_f
+// does for the setpoint: bed and setting are quantised by identical rules, so
+// "the underline has arrived under the wedge" means precisely what it looks
+// like it means. Two marks rounded differently would be the real lie.
+static bool seg_water_level(float f, int *out)
+{
+    if (f < 0) return false;                                  // no reading yet
+    *out = dial_rel_from_f((int)lroundf(f));
+    return true;
+}
+
+// The underline is ink, not accent. It reports a fact about the bed and must
+// never be mistaken for a setting you could have chosen — if it borrowed the
+// ramp there would be two coloured marks on one instrument competing to be
+// "the value". Quiet, neutral, and on its own radius is the whole brief.
+static void seg_tick_render(const dial_palette_t *pal)
+{
+    if (!s_seg_tick) return;
+    int lvl;
+    // Follows the segments' state tier: an offline zone has no live reading to
+    // report, so the underline goes with the rest of the ring rather than
+    // hanging there asserting a stale number.
+    if (!s_rel || s_seg_lit_opa == LV_OPA_TRANSP || !seg_water_level(s_actual_f, &lvl)) {
+        lv_obj_add_flag(s_seg_tick, LV_OBJ_FLAG_HIDDEN);
+        return;
+    }
+
+    // Exactly the segment's own angles, including its 1° gap, so the underline
+    // is visibly a property OF that segment rather than a mark that happens to
+    // be near it.
+    uint16_t a0, a1;
+    seg_bounds(lvl - DIAL_REL_MIN, &a0, &a1);
+
+    lv_arc_set_angles(s_seg_tick, a0, a1);
+    lv_obj_set_style_arc_color(s_seg_tick, pal->ink_secondary, LV_PART_INDICATOR);
+    lv_obj_set_style_arc_opa(s_seg_tick,
+                             (lv_opa_t)((int)SEG_TICK_OPA * (int)s_seg_lit_opa / 255),
+                             LV_PART_INDICATOR);
+    lv_obj_clear_flag(s_seg_tick, LV_OBJ_FLAG_HIDDEN);
+}
+
+// Restyle all 21 segments for the given setpoint. Cheap enough to call on every
+// detent and every drag frame: 21 style writes, no allocation, no layout.
+static void segments_render(int target_f)
+{
+    if (!s_seg[0]) return;
+    if (!s_rel) {
+        for (int i = 0; i < SEG_N; i++) lv_obj_add_flag(s_seg[i], LV_OBJ_FLAG_HIDDEN);
+        return;
+    }
+
+    const dial_palette_t *pal = PAL();
+    int lvl = dial_rel_from_f(target_f);
+    // Three tiers of the SAME ramp, so nothing on this ring is a different
+    // material from anything else — only louder or quieter:
+    //   rest   the whole scale, dim enough to read as chassis
+    //   trail  neutral -> the setting, so distance from neutral is a length
+    //   active full strength and 6px fatter
+    lv_opa_t trail_opa = (lv_opa_t)((int)SEG_TRAIL_OPA * (int)s_seg_lit_opa / 255);
+    lv_opa_t rest_opa  = (lv_opa_t)((int)SEG_REST_OPA  * (int)s_seg_lit_opa / 255);
+
+    for (int i = 0; i < SEG_N; i++) {
+        int l = i + DIAL_REL_MIN;
+        bool active = (l == lvl);
+        // Strictly between neutral and the setting: level 0 is deliberately
+        // NOT part of the trail, so the neutral landmark survives at every
+        // setting instead of disappearing into the wash the moment you leave
+        // it — the landmark is what makes the other 20 segments mean anything.
+        bool trail = (l > 0 && l < lvl) || (l < 0 && l > lvl);
+
+        lv_color_t col = seg_ramp(l, pal);
+        lv_opa_t   opa;
+        lv_coord_t w = SEG_W;
+        if (active) {
+            opa = s_seg_lit_opa;  w = SEG_W_ACTIVE;
+        } else if (trail) {
+            opa = trail_opa;
+        } else if (l == 0) {
+            // The neutral landmark is the one place the ramp is overruled:
+            // its own ramp colour is neutral_holding, which at rest opacity is
+            // just the dimmest point of a smooth gradient and disappears
+            // exactly where the eye most needs a mark. ink_secondary is the
+            // face's own "quiet but definitely there" tone.
+            col = pal->ink_secondary;  opa = SEG_ZERO_OPA;
+        } else {
+            opa = rest_opa;
+        }
+
+        // LVGL anchors the stroke's OUTER edge at the object's own radius and
+        // grows it inward, so a fatter segment drawn in a fixed-size object
+        // would creep inward off the band. Sizing the object to
+        // r = SEG_R + w/2 instead keeps every segment's CENTRELINE on 157 and
+        // lets the active one thicken symmetrically, which is the whole point
+        // of the emphasis — it should read as the same ring, pressed harder.
+        lv_coord_t d = 2 * (SEG_R + w / 2);
+        lv_obj_set_size(s_seg[i], d, d);
+        lv_obj_center(s_seg[i]);
+        lv_obj_set_style_arc_width(s_seg[i], w, LV_PART_INDICATOR);
+        lv_obj_set_style_arc_color(s_seg[i], col, LV_PART_INDICATOR);
+        lv_obj_set_style_arc_opa(s_seg[i], opa, LV_PART_INDICATOR);
+        lv_obj_clear_flag(s_seg[i], LV_OBJ_FLAG_HIDDEN);
+    }
+
+    seg_tick_render(pal);
 }
 
 /* ---- identity underline (design-spec.md §4 #6, §8) --------------------- */
@@ -358,14 +638,24 @@ static void apply_palette_and_state(const app_state_t *st)
     lv_obj_t *scr = lv_obj_get_parent(s_arc);   // s_arc's parent is the screen
     lv_obj_set_style_bg_color(scr, pal->bg, 0);
 
-    // Arc track + indicator (design-spec.md §4 #2-3).
+    // Arc track + indicator (design-spec.md §4 #2-3). Both go fully
+    // transparent in relative mode: the level ring replaces the continuous
+    // sweep outright, and leaving the track underneath would be worse than
+    // redundant — it paints straight through the 1° gaps and welds the 21
+    // segments back into one bar. The widget itself stays alive and ranged
+    // (configure_arc_range above) because level_angle and the drag path still
+    // read its geometry.
     lv_obj_set_style_arc_color(s_arc, pal->track, LV_PART_MAIN);
-    lv_obj_set_style_arc_opa(s_arc, LV_OPA_70, LV_PART_MAIN);
+    lv_obj_set_style_arc_opa(s_arc, s_rel ? LV_OPA_TRANSP : LV_OPA_70, LV_PART_MAIN);
     lv_obj_set_style_arc_color(s_arc, arc_accent, LV_PART_INDICATOR);
     lv_opa_t indic_opa = relief ? LV_OPA_COVER
                         : (kind == ZK_OFFLINE) ? LV_OPA_TRANSP
                         : (kind == ZK_STANDBY) ? LV_OPA_30 : LV_OPA_COVER;
-    lv_obj_set_style_arc_opa(s_arc, indic_opa, LV_PART_INDICATOR);
+    // The level ring inherits the indicator's state tiers rather than
+    // inventing its own, so an offline or standby zone quiets identically in
+    // both scales — then the arc's own indicator is switched off.
+    s_seg_lit_opa = indic_opa;
+    lv_obj_set_style_arc_opa(s_arc, s_rel ? LV_OPA_TRANSP : indic_opa, LV_PART_INDICATOR);
 
     // Water level. Cached in °F (and the accent with it) so a drag or a detent
     // can re-draw the step without waiting for the next poll — the water doesn't
@@ -374,6 +664,7 @@ static void apply_palette_and_state(const app_state_t *st)
     s_actual_f = (z->actual_c >= 0) ? (float)dial_c_to_f(z->actual_c) : -1.0f;
     s_level_accent = arc_accent;
     level_render(s_shown_f);
+    segments_render(s_shown_f);
 
     // Side name + identity underline.
     lv_obj_set_style_text_color(s_name_lbl, pal->ink_secondary, 0);
@@ -400,17 +691,24 @@ static void apply_palette_and_state(const app_state_t *st)
     if (st->rel_mode) lv_label_set_text(s_unit_lbl, "LEVEL");
     else              lv_label_set_text(s_unit_lbl, st->units_c ? "\xC2\xB0" "C" : "\xC2\xB0" "F");
 
-    // Neutral landmark: a tick at 12 o'clock (level 0's center) shown only in
-    // relative mode — it turns the ring from a plain bar into a bipolar
-    // instrument. Geometrically free: the arc's midpoint already sits at top.
-    lv_obj_set_style_bg_color(s_zero_notch, pal->ink_secondary, 0);
-    if (s_rel) lv_obj_clear_flag(s_zero_notch, LV_OBJ_FLAG_HIDDEN);
-    else       lv_obj_add_flag(s_zero_notch, LV_OBJ_FLAG_HIDDEN);
-
     // Setpoint handle: themed to the live accent and parked at the setpoint.
     // Left alone while the user is dragging it — they own s_shown_f then, and a
     // reposition from a stray commit would fight the finger.
+    //
+    // In relative mode it goes INVISIBLE but stays live (owner: "we don't need
+    // the block and dot for the current temp, the highlighted wedge should
+    // do"). The fattened segment already says where the setpoint is, and it
+    // says it better — a thumb parked on top of it is a second marker for one
+    // fact, and it covers the very segment it is pointing at. What it must not
+    // do is take the drag with it: this face has exactly one temperature touch
+    // target, so the handle keeps its hit box, its ext_click_area and its
+    // position on the ring and simply stops painting. LV_OBJ_FLAG_HIDDEN would
+    // have been the obvious way to do this and is the wrong one — LVGL skips
+    // hidden objects in hit-testing, which would silently kill drag-to-set in
+    // relative mode.
     lv_obj_set_style_bg_color(s_handle, arc_accent, 0);
+    lv_obj_set_style_bg_opa(s_handle, s_rel ? LV_OPA_TRANSP : LV_OPA_COVER, 0);
+    lv_obj_set_style_border_opa(s_handle, s_rel ? LV_OPA_TRANSP : LV_OPA_COVER, 0);
     if (!s_dragging) position_handle(s_shown_f);
 
     // State pill: surface fill, state-accent border/text/glyph. While relief
@@ -763,6 +1061,7 @@ static void handle_event_cb(lv_event_t *e)
         lv_arc_set_value(s_arc, f);
         render_numeral(f);
         level_render(f);
+        segments_render(f);
         position_handle(f);
         dial_state_stamp_input();
         return;
@@ -777,6 +1076,7 @@ static void handle_event_cb(lv_event_t *e)
         lv_arc_set_value(s_arc, f);
         render_numeral(f);
         level_render(f);
+        segments_render(f);
         position_handle(f);
     }
     if (f != s_press_f) post_temp_for(zone, f);   // a tap that didn't move commits nothing
@@ -791,6 +1091,45 @@ static void ota_notice_cb(lv_event_t *e)
     (void)e;
     dial_haptics_play(HAPTIC_TICK);
     ui_router_go(SCR_UPDATE, NULL, LV_SCR_LOAD_ANIM_NONE);
+}
+
+// Tap the setpoint numeral: swap between the absolute (°F/°C) and relative
+// (−10…+10 level) scales. The numeral IS the thing whose meaning changes, so
+// it is the honest place to change it — and it saves a trip into Settings for
+// what turns out to be a habitual toggle. Same pref, same NVS key, same
+// function Settings > Scale calls (scr_settings.c's row_scale_cb): one source
+// of truth, persisted, so the two can never drift apart.
+//
+// Re-rendered inline rather than waiting for the next state push: the store
+// bumps its generation and the poll picks it up, but that is up to a frame or
+// two away and this is a direct manipulation — the numeral must change under
+// the finger.
+//
+// The gesture guard is the important part. s_num_box is 210x92 in the middle
+// of the face, so it sits under a lot of swipes; making it clickable at all
+// means LVGL now hit-tests it first, and LVGL sends CLICKED on release whether
+// or not a GESTURE already fired for the same touch (the identical trap
+// power_long_press_cb documents for long-press). Without this check, a swipe
+// that began on the numeral would navigate to the next face AND silently flip
+// the user's scale on the way out. EVENT_BUBBLE (set in create) is the other
+// half: it keeps the GESTURE reaching the screen's own handler so the swipe
+// still works at all.
+static void numeral_event_cb(lv_event_t *e)
+{
+    (void)e;
+    if (lv_indev_get_gesture_dir(lv_indev_get_act()) != LV_DIR_NONE) return;
+
+    dial_state_stamp_input();
+    dial_haptics_play(HAPTIC_TICK);
+
+    app_state_t st;
+    dial_state_get(&st);
+    dial_state_set_rel_mode(!st.rel_mode);
+
+    dial_state_get(&st);
+    apply_palette_and_state(&st);      // sets s_rel, re-ranges the arc, redraws the ring
+    lv_arc_set_value(s_arc, s_shown_f);
+    render_numeral(s_shown_f);
 }
 
 static void power_event_cb(lv_event_t *e)
@@ -930,18 +1269,52 @@ static void create(lv_obj_t *scr, void *arg)
     lv_obj_clear_flag(s_level, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_add_flag(s_level, LV_OBJ_FLAG_HIDDEN);   // until the first measurement
 
-    // Neutral (level 0) landmark — a short tick at 12 o'clock over the arc
-    // band, created after the arc so it sits above the fill. Shown only in
-    // relative mode (apply_palette_and_state); the arc's own midpoint is
-    // already at top, so this marks the center of the bipolar scale.
-    s_zero_notch = lv_obj_create(scr);
-    lv_obj_set_size(s_zero_notch, 3, 16);
-    lv_obj_set_style_radius(s_zero_notch, 0, 0);
-    lv_obj_set_style_border_width(s_zero_notch, 0, 0);
-    lv_obj_set_style_bg_opa(s_zero_notch, LV_OPA_60, 0);
-    lv_obj_clear_flag(s_zero_notch, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_align(s_zero_notch, LV_ALIGN_CENTER, 0, -ARC_R);
-    lv_obj_add_flag(s_zero_notch, LV_OBJ_FLAG_HIDDEN);
+    // Level ring — 21 segments over the arc's own sweep, one per level, drawn
+    // only in relative mode (segments_render). Created here, between the arc
+    // and the boost glyphs, so the existing move_foreground chain below keeps
+    // the glyphs and the setpoint handle above them; each is display-only, so
+    // the handle remains the sole temperature touch target on the ring.
+    //
+    // Every segment is a full-size lv_arc with its background arc switched off
+    // and only the INDICATOR drawn, because the indicator is the part that
+    // takes an angle pair. Butt caps, not rounded: rounded ends would eat into
+    // the 1° gaps from both sides and close them (~2.7px of gap against an 8px
+    // cap radius), and the mock's own segments are square-ended for the same
+    // reason — a bar chart bent into a circle, not 21 little lozenges.
+    for (int i = 0; i < SEG_N; i++) {
+        uint16_t a0, a1;
+        seg_bounds(i, &a0, &a1);
+        s_seg[i] = lv_arc_create(scr);
+        lv_obj_set_size(s_seg[i], 2 * (SEG_R + SEG_W / 2), 2 * (SEG_R + SEG_W / 2));
+        lv_obj_center(s_seg[i]);
+        lv_arc_set_rotation(s_seg[i], 135);
+        lv_arc_set_bg_angles(s_seg[i], 0, 270);
+        lv_arc_set_angles(s_seg[i], a0, a1);
+        lv_obj_set_style_arc_opa(s_seg[i], LV_OPA_TRANSP, LV_PART_MAIN);   // no track of its own
+        lv_obj_set_style_arc_width(s_seg[i], SEG_W, LV_PART_INDICATOR);
+        lv_obj_set_style_arc_rounded(s_seg[i], false, LV_PART_INDICATOR);
+        lv_obj_remove_style(s_seg[i], NULL, LV_PART_KNOB);
+        lv_obj_clear_flag(s_seg[i], LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_add_flag(s_seg[i], LV_OBJ_FLAG_HIDDEN);   // until a render says otherwise
+    }
+
+    // The live-temperature underline, on its own band just inside the ring.
+    // Created after the segments so it draws over them if the two ever overlap,
+    // and rounded so its ends taper rather than presenting square edges that
+    // would read as a second, thinner segment.
+    s_seg_tick = lv_arc_create(scr);
+    lv_obj_set_size(s_seg_tick, 2 * (SEG_TICK_R + SEG_TICK_W / 2),
+                                2 * (SEG_TICK_R + SEG_TICK_W / 2));
+    lv_obj_center(s_seg_tick);
+    lv_arc_set_rotation(s_seg_tick, 135);
+    lv_arc_set_bg_angles(s_seg_tick, 0, 270);
+    lv_arc_set_angles(s_seg_tick, 0, 0);
+    lv_obj_set_style_arc_opa(s_seg_tick, LV_OPA_TRANSP, LV_PART_MAIN);
+    lv_obj_set_style_arc_width(s_seg_tick, SEG_TICK_W, LV_PART_INDICATOR);
+    lv_obj_set_style_arc_rounded(s_seg_tick, true, LV_PART_INDICATOR);
+    lv_obj_remove_style(s_seg_tick, NULL, LV_PART_KNOB);
+    lv_obj_clear_flag(s_seg_tick, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(s_seg_tick, LV_OBJ_FLAG_HIDDEN);
 
     // #3c Boost glyphs capping the arc's two ends (owner: relocate the boost
     // controls off the dial face — "remove the boost iconbuttons where they
@@ -1134,13 +1507,18 @@ static void create(lv_obj_t *scr, void *arg)
     lv_label_set_text(s_water_lbl, "WATER --");
     lv_obj_align(s_water_lbl, LV_ALIGN_CENTER, 0, 98 - CY);
 
-    // #8 Setpoint numeral — fixed anchor box so digits never reflow.
+    // #8 Setpoint numeral — fixed anchor box so digits never reflow. Also the
+    // scale toggle's touch target (numeral_event_cb): EVENT_BUBBLE so a swipe
+    // starting here still reaches the screen's gesture handler and navigates,
+    // which is the whole reason this box could stay non-clickable until now.
     s_num_box = lv_obj_create(scr);
     lv_obj_set_size(s_num_box, 210, 92);
     lv_obj_set_style_bg_opa(s_num_box, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(s_num_box, 0, 0);
-    lv_obj_clear_flag(s_num_box, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_clear_flag(s_num_box, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(s_num_box, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_EVENT_BUBBLE);
     lv_obj_align(s_num_box, LV_ALIGN_CENTER, 0, 150 - CY);
+    lv_obj_add_event_cb(s_num_box, numeral_event_cb, LV_EVENT_CLICKED, NULL);
 
     s_temp_lbl = lv_label_create(s_num_box);
     lv_obj_set_style_text_font(s_temp_lbl, &dial_font_num_88, 0);
@@ -1316,7 +1694,9 @@ static void destroy(void)
     s_actual_f = -1.0f;
 
     s_level = NULL;
-    s_zero_notch = NULL;
+    for (int i = 0; i < SEG_N; i++) s_seg[i] = NULL;
+    s_seg_tick = NULL;
+    s_seg_lit_opa = LV_OPA_COVER;
     s_handle = NULL;
     s_dragging = false;
     s_arc = s_stale_dot = s_name_lbl = NULL;
@@ -1429,6 +1809,7 @@ static bool on_knob(int detents)
     s_shown_f = nf;
     render_numeral(nf);
     level_render(nf);
+    segments_render(nf);
     position_handle(nf);
     anim_zoom_bump(s_temp_lbl);
     post_temp(nf);
