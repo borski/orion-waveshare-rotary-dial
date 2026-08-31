@@ -23,6 +23,11 @@
  * below that; Away mode (moved here from the now-removed SCR_QUICK sheet)
  * sits directly above the destructive rows, which stay last, unchanged.
  *
+ * "My side" (dual toppers only) is inserted between Back and Adjustment mode,
+ * ahead of that ordering, because it isn't a preference: it is the only route
+ * to the other side of the bed now that the dial's swipe chain drops the
+ * partner face while the shown side is on. See create() for the full note.
+ *
  * "Screen timeout" (the lock-screen/standby idle threshold, dial_power's
  * STANDBY level — owner request: "a configurable lock screen timer... in an
  * appropriate location") was added directly below Brightness: both rows
@@ -45,6 +50,8 @@ static lv_obj_t *s_title_lbl;
 static lv_obj_t *s_list;
 static lv_obj_t *s_val_scale, *s_val_units, *s_val_adjust_mode, *s_val_haptics, *s_val_rotation, *s_val_away;
 static lv_obj_t *s_val_screen_timeout;
+// NULL on a single-zone topper, where the row isn't built at all.
+static lv_obj_t *s_val_side;
 
 typedef enum { CONFIRM_RELINK = 0, CONFIRM_FACTORY, CONFIRM_COUNT } confirm_id_t;
 static lv_obj_t   *s_val_confirm[CONFIRM_COUNT];
@@ -227,6 +234,17 @@ static void row_brightness_cb(lv_event_t *e)
     ui_router_go(SCR_BRIGHTNESS_MENU, NULL, LV_SCR_LOAD_ANIM_MOVE_LEFT);
 }
 
+// The one route to the other side of the bed that doesn't depend on the swipe
+// chain. SCR_SIDEPICK already commits ui_zone and lands on that side's dial
+// face, which is exactly the job — no separate flow needed, and it shows both
+// sides' real names, so it reads as a choice rather than a toggle.
+static void row_side_cb(lv_event_t *e)
+{
+    (void)e;
+    dial_haptics_play(HAPTIC_TICK);
+    ui_router_go(SCR_SIDEPICK, NULL, LV_SCR_LOAD_ANIM_MOVE_LEFT);
+}
+
 // Screen (lock/standby) timeout: how long the dial sits idle before
 // dial_power drops the display into its dim standby clock face. Cycles
 // through the five values dial_state.h's DIAL_SCR_TIMEOUT_CHOICES offers
@@ -310,10 +328,28 @@ static void create(lv_obj_t *scr, void *arg)
 
     s_list = dial_list_create(scr, ROW_H);
 
-    // No "My side" row: it only re-ran SCR_SIDEPICK, which sets the very same
-    // ui_zone that one swipe on the dial already sets (and persists) — the row
-    // changed nothing you couldn't change faster by swiping.
     make_row(s_list, LV_SYMBOL_LEFT "  Back", row_back_cb, NULL);
+
+    // "My side" is back, and for a new reason. It was removed because it only
+    // re-ran SCR_SIDEPICK to set the same ui_zone a swipe on the dial already
+    // set — true then, but the dial now drops the partner face out of the
+    // swipe chain while the shown side is ON (scr_dial.c's on_gesture), so
+    // that a hand in the dark can't slide over and adjust the half of the bed
+    // somebody is asleep on. That deliberately removes the fast route, which
+    // makes this row the only one left. It sits directly under Back rather
+    // than among the preference rows below: it is now navigation, not a
+    // preference, and someone who came here to reach the other side shouldn't
+    // have to rotate through the list to find it.
+    //
+    // Built only on a dual topper — a single-zone bed has no other side, and
+    // SCR_SIDEPICK's two halves would be offering one that doesn't exist.
+    // Decided at create() rather than hidden in on_state because Settings is
+    // only reachable through the menu face, which needs a working dial face,
+    // so have_state is long since true by the time this runs.
+    app_state_t st;
+    dial_state_get(&st);
+    if (dial_state_is_dual(&st))
+        make_row(s_list, "My side", row_side_cb, &s_val_side);
 
     // "Adjustment mode" is the longest label in this list — at Mont 24 it
     // alone eats most of a row's ~288px content width, so a right-aligned
@@ -368,6 +404,7 @@ static void destroy(void)
     s_title_lbl = NULL;
     s_val_scale = s_val_units = s_val_adjust_mode = s_val_haptics = s_val_rotation = s_val_away = NULL;
     s_val_screen_timeout = NULL;
+    s_val_side = NULL;
     for (int i = 0; i < CONFIRM_COUNT; i++) s_val_confirm[i] = NULL;
     s_armed = CONFIRM_COUNT;
 }
@@ -389,6 +426,14 @@ static void on_state(const app_state_t *st)
         lv_label_set_text(s_val_units, st->units_c ? "\xC2\xB0" "C" : "\xC2\xB0" "F");
     lv_label_set_text(s_val_adjust_mode, st->sched_follow ? "Schedule" : "Hold");
     lv_label_set_text(s_val_away, st->away ? "On" : "Off");
+    // Only built on a dual topper. Shows the side's own name when the account
+    // has one, so the row answers "which side am I on?" in the same words the
+    // dial face and the picker use, and falls back to the geometry otherwise.
+    if (s_val_side) {
+        const char *name = st->zones[st->ui_zone].user_name;
+        lv_label_set_text(s_val_side, name[0] ? name
+                                              : (st->ui_zone == ZONE_A ? "Right" : "Left"));
+    }
     lv_label_set_text(s_val_screen_timeout, dial_scr_timeout_label(st->screen_timeout_s));
     // Indexed directly by the stored value (see app_state_t.haptics_level):
     // 0=Off, 1=Auto, 2=Low, 3=High.

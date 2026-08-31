@@ -230,6 +230,48 @@ void dial_haptics_play(haptic_effect_t fx)
     xQueueOverwrite(s_q, &req);
 }
 
+void dial_haptics_play_unmuted(haptic_effect_t fx)
+{
+    if (!s_present || !s_q) return;
+    haptic_req_t req = { fx, false };
+    xQueueOverwrite(s_q, &req);
+}
+
+// Multi-pulse patterns need their own task: the queue is length 1 with
+// overwrite, so three back-to-back play() calls would collapse into one pulse.
+// Exactly one pattern may be in flight — a second request while the first is
+// still running would interleave its pulses into an unreadable buzz, so it
+// degrades to a single confirm instead. The same fallback covers a failed
+// xTaskCreate (fragmented or exhausted heap): a confirmation the user can feel
+// matters more than the pattern it was supposed to arrive in.
+static volatile bool s_pattern_busy;
+
+static void triple_confirm_task(void *arg)
+{
+    (void)arg;
+    haptic_req_t soft = { HAPTIC_STOP, true };
+    for (int i = 0; i < 2; i++) {
+        xQueueOverwrite(s_q, &soft);
+        vTaskDelay(pdMS_TO_TICKS(140));
+    }
+    haptic_req_t firm = { HAPTIC_CONFIRM, false };
+    xQueueOverwrite(s_q, &firm);
+    s_pattern_busy = false;
+    vTaskDelete(NULL);
+}
+
+void dial_haptics_play_triple_confirm(void)
+{
+    if (!s_present || !s_q) return;
+    if (!s_pattern_busy) {
+        s_pattern_busy = true;
+        if (xTaskCreate(triple_confirm_task, "haptic_pat", 2048, NULL, 4, NULL) == pdPASS)
+            return;
+        s_pattern_busy = false;
+    }
+    dial_haptics_play_unmuted(HAPTIC_CONFIRM);
+}
+
 // Deliberately ignores s_muted: this is the one pulse that must survive the
 // router's knob-dispatch mute (see the header). Still honours OFF, which the
 // task enforces.

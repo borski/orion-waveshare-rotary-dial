@@ -1,7 +1,9 @@
 /*
  * SCR_SIDEPICK — "Which side of the bed?" Shown once, right after first
  * link on a fresh device (main.c's nav_policy), and reused from Settings'
- * "My side" row on any device thereafter.
+ * "My side" row on any dual-zone device thereafter — which, since the dial
+ * drops the partner face out of the swipe chain while the shown side is on,
+ * is now the only way to cross to the other side of the bed.
  *
  * Two full-height halves (>=88px tall — they're the full 340px content
  * height): left = ZONE_B, right = ZONE_A, matching design-spec.md §8's

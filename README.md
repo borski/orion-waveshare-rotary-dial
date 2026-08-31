@@ -91,6 +91,17 @@ board bring-up notes, and firmware architecture live in
   face says which is in effect, and when it runs out.
 - **Boost heat or cool** from the icons at either end of the temperature
   arc — a timed push in one direction that returns you to where you were.
+  For sleepy shortcuts, keep turning the knob once you reach the cold or hot
+  end: the first detent at the rail arms with a
+  single bump, then keep pushing the same way; extra turns stay quiet for about
+  a second, then a triple bump confirms and starts the last-used Boost
+  duration, defaulting to 15 minutes. The opposite turn
+  cancels arming, and once a Boost is running the same arm-then-confirm turn
+  in the opposite direction cancels it. Dragging the arc handle by hand only
+  sets the temperature — tap the icons for a boost. A side that is switched
+  off ignores all of it — knob and handle alike — and breathes the power
+  button instead, so a half-asleep nudge can't quietly set a temperature on a
+  side that isn't running.
 - **Quiet knob, honest haptics** — the encoder's own mechanical detents are
   the feedback when you turn it; the motor only fires where it tells you
   something the clicks can't, like hitting the end of a range. Strength is

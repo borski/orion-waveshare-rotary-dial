@@ -16,6 +16,7 @@
 #include "esp_random.h"
 #include "esp_http_client.h"
 #include "esp_http_server.h"
+#include "esp_system.h"   // esp_get_free_heap_size, in the transport error detail
 
 // Trust anchors for Orion's server (GTS Root R4 + GlobalSign Root CA), embedded
 // from the system trust store. Used instead of the IDF cert bundle, whose
@@ -99,6 +100,10 @@ static esp_err_t on_http(esp_http_client_event_t *e)
     return ESP_OK;
 }
 
+// Why the last esp_http_client_perform() failed at the transport layer, kept
+// because that path reports no status and no body -- see where it's filled in.
+static char s_transport_err[112];
+
 static void http_reset(void)
 {
     if (s_http) { esp_http_client_cleanup(s_http); s_http = NULL; }
@@ -148,6 +153,14 @@ static int http_do(const char *url, esp_http_client_method_t method,
         int tc = 0, tf = 0;
         esp_http_client_get_and_clear_last_tls_error(s_http, &tc, &tf);
         s_last_err_cert = tf != 0;
+        // A transport failure returns -1 with no body, so "HTTP -1" was the
+        // whole story anyone got -- on screen and in the log. Keep the reason
+        // here: esp_err_to_name already separates DNS from connect from
+        // handshake, the TLS pair separates a cert problem from a truncated
+        // one, and the heap number catches the handshake that couldn't afford
+        // its ~40KB.
+        snprintf(s_transport_err, sizeof(s_transport_err), "%s tls=0x%x/0x%x heap=%u",
+                 esp_err_to_name(err), tc, tf, (unsigned)esp_get_free_heap_size());
         http_reset();
         free(r.buf); r = (resp_t){ 0 };   // don't glue two attempts' bodies together
     }
@@ -401,7 +414,10 @@ static bool token_request(const char *token_endpoint, const char *body)
                      "application/x-www-form-urlencoded", body, &resp);
     if (st != 200 || !resp) {
         ESP_LOGE(TAG, "token HTTP %d: %s", st, resp ? resp : "(no body)");
-        snprintf(s_token_err, sizeof(s_token_err), "HTTP %d\n%.150s", st, resp ? resp : "");
+        if (st <= 0)
+            snprintf(s_token_err, sizeof(s_token_err), "HTTP %d\n%s", st, s_transport_err);
+        else
+            snprintf(s_token_err, sizeof(s_token_err), "HTTP %d\n%.150s", st, resp ? resp : "");
         // Permanent ONLY for the RFC-defined dead-refresh-token signal (400/401
         // + invalid_grant). Transport failures (status <= 0), 408/429, 5xx, and
         // any other 4xx are transient -- worth retrying, not worth re-linking.
@@ -475,12 +491,17 @@ static esp_err_t cb_handler(httpd_req_t *req)
 
     httpd_resp_set_type(req, "text/html; charset=UTF-8");
     if (match) {
-        s_got_code = true;   // s_code already holds the code
         httpd_resp_sendstr(req,
             "<!doctype html><meta charset=utf-8><meta name=viewport content='width=device-width,initial-scale=1'>"
             "<body style='font-family:sans-serif;text-align:center;margin-top:40px'>"
             "<h2 style='color:#0b6'>Dial authorized \xE2\x9C\x93</h2>"
             "<p>You can close this page and return to the dial.</p></body>");
+        // Raised only once the page is on its way out. The worker treats this
+        // flag as "the server has done its job" and shuts it down immediately
+        // to get the sockets back for the token exchange, so setting it any
+        // earlier would race that teardown against this reply and show the
+        // phone a connection error instead of the tick.
+        s_got_code = true;   // s_code already holds the code
     } else {
         httpd_resp_set_status(req, "400 Bad Request");
         httpd_resp_sendstr(req, "authorization failed (state mismatch or no code)");
@@ -546,6 +567,13 @@ bool dial_oauth_finish_authorize(const oauth_disc_t *disc, const char *client_id
     free(body);
     return ok;
 }
+
+// Has the browser come back with the code yet? Lets the caller wait for consent
+// in slices it can do other work between, instead of parking in the call above
+// for the whole window -- the worker task is the only thing that services the
+// command queue, so a five-minute park in here left Settings' reboot actions
+// looking dead. The wait above still handles the arrival itself.
+bool dial_oauth_have_code(void) { return s_got_code; }
 
 void dial_oauth_stop_authorize(void)
 {

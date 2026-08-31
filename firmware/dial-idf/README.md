@@ -145,7 +145,10 @@ itself:
    automatically — nothing to type back in on the dial itself. If your phone
    is on a different network (e.g. still on cellular), the dial can't receive
    that callback and the QR will effectively hang; switch your phone to the
-   same Wi-Fi and rescan.
+   same Wi-Fi and rescan. The network name printed under the code is a link:
+   tap it to open Wi-Fi settings if it's the *dial* that's on the wrong
+   network. Swiping left opens the menu from here too, so Settings and
+   software update stay reachable before the dial is linked.
 4. **Pick a side.** On a dual-zone topper, the dial asks "Which side of the
    bed?" once, right after linking — tap the half of the screen for your
    side. (Skipped entirely on a single-zone topper — there's only one side to
@@ -159,20 +162,29 @@ itself:
   other screens (menus, network/password pickers) to move focus or dial in a
   value. Turning is deliberately silent — the encoder's own mechanical
   detents are the feedback — but hitting the end of a range gives a distinct
-  stop pulse.
+  stop pulse. For a sleepy shortcut, keep turning once you reach the cold or
+  hot end of the temperature range: the first detent at the rail arms with a
+  single bump, further turns stay quiet for about a second, and the next one
+  after that confirms with a triple bump and starts the last-used Boost
+  duration, defaulting to 15 minutes. Turn the opposite way, or simply stop,
+  to cancel arming. While a side is switched off none of this applies: the
+  knob and the arc handle won't move its setpoint or start a Boost, and the
+  power button breathes instead to point at what turns the side back on.
 - **Touch:** tap the power button on the dial screen to turn that side on/off;
   long-press it to open the Schedule/Hold picker. Tap the snowflake or flame
   icon sitting at either end of the temperature arc to start a timed boost
-  (cool or heat). Tap the status pill above the power button — it reads
-  "Holding" or "Until H:MM" depending on whether your last change rides until
-  you touch it again or only until the schedule's next step — to jump straight
-  to that same Schedule/Hold picker; while a boost is running it instead shows
-  that boost's end time and an ✕ that cancels it. Tap the big number itself to
-  switch between the absolute temperature and Orion's −10…+10 level — the same
-  setting Settings → Scale writes, so it sticks across a reboot. Swipe
-  left/right to move between your side, your partner's side, and the menu.
-  Swipe right on any menu sub-screen (or tap its "Back" row) returns to the
-  menu.
+  (cool or heat). Dragging the arc handle only ever sets the temperature —
+  the rails are ordinary setpoints there, and the icons are the one-tap way to
+  start a boost by hand. Tap
+  that boost's end time and an ✕ that cancels it; while a boost is running the
+  knob cancels it with the mirror of the gesture that started it — turn away
+  from the boost (left during a heat boost, right during a cool one) once to
+  arm with a single bump, then again about a second later for the stronger
+  confirm-and-cancel. Tap the big number itself to switch between the absolute
+  temperature and Orion's −10…+10 level — the same setting Settings → Scale
+  writes, so it sticks across a reboot. Swipe left/right to move between your
+  side, your partner's side, and the menu. Swipe right on any menu sub-screen
+  (or tap its "Back" row) returns to the menu.
 - **The level ring.** On the relative scale the dial face swaps its continuous
   arc for 21 discrete segments, one per level. The levels were never evenly
   spaced in degrees — they carry hand-picked °F values across 10–45 °C — so a
@@ -183,8 +195,13 @@ itself:
   fatter. The stretch back to neutral stays lit so distance from centre is a
   length rather than arithmetic, level 0 keeps a quiet grey mark of its own so
   the ring reads bipolar at a glance, and a thin underline hugs whichever
-  segment the water is actually sitting under right now. Absolute mode is
-  unchanged — same arc, same handle, same water level.
+  segment the water is actually sitting under right now — while the side is
+  switched on. Off, that underline goes away with everything else that would
+  make the face look like it were still running. Absolute mode keeps the same
+  arc and the same handle, and reports the water in the WATER caption alone:
+  the wash that used to shade the arc between the setpoint and the measured
+  temperature has been removed, so the one mark on that band is the setting
+  you chose.
 - **Menu → Settings:** adjustment mode (Schedule/Hold — the default for what a
   dial-side change does), **Brightness** (its own sub-screen: separate Day,
   Night (in use), and Night (clock) levels, each a full-screen 0–100% picker
@@ -239,7 +256,8 @@ itself:
   dial listens for the OAuth callback on its own LAN, so a phone on cellular
   data or a different network can approve the consent page but the dial will
   never see it land. Put your phone on the same network as the dial and scan
-  again.
+  again. The network name under the code says which one that is, and tapping
+  it opens Wi-Fi settings if the dial is the one that needs moving.
 - **The dial is stuck on "Connecting to Wi-Fi..." / "Orion unreachable."**
   These screens show the actual error and a retry countdown; the dial keeps
   retrying with backoff on its own. If it's stuck for more than a few

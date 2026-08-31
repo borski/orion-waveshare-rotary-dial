@@ -86,6 +86,12 @@ static const char *TAG = "app";
 // Sleep schedules (M5) don't change minute to minute — refresh far less
 // often than device state, piggybacked on the same idle poll path.
 #define SCHED_INTERVAL_US (30LL * 60 * 1000000)   // ~30 min
+// A refresh that misses — no synced clock yet, or a failed call — re-tries on
+// this much shorter cadence instead of costing a full interval. The FIRST
+// fetch after a boot is the one that matters: until it lands, sched_valid is
+// false and temp_write_phase(), the night window and the pill's hold/until
+// grammar all take their "no schedule" branch.
+#define SCHED_RETRY_US (60LL * 1000000)           // ~1 min
 
 // Auto OTA check (M6): once per uptime-day, and only checks (never applies)
 // — see the gating comment at its call site for the full safe-window rule.
@@ -107,6 +113,14 @@ static const char *TAG = "app";
 
 #define BACKOFF_MIN_S  5
 #define BACKOFF_MAX_S 60
+
+// How long the QR stays up waiting for consent before it's refreshed, and how
+// finely that wait is chopped. The slice is only a responsiveness knob — it
+// bounds how long a reboot command posted from the link screen waits to be
+// noticed, so it wants to be well under the ~300ms that reads as instant, and
+// costs one queue peek each time round.
+#define CONSENT_WINDOW_MS 300000
+#define CONSENT_SLICE_MS     250
 
 // Discovery + anonymous client registration are the steps that must complete
 // before the Orion-link QR can even be built (the authorize URL needs the
@@ -255,7 +269,25 @@ static screen_id_t nav_policy(const app_state_t *st, void **arg)
         if (cur == SCR_NETPICK || cur == SCR_PASSKEY) return cur;
         return SCR_WIFI_PORTAL;
     }
-    case PH_OAUTH_WAIT_CONSENT: return SCR_OAUTH_QR;
+    case PH_OAUTH_WAIT_CONSENT: {
+        // Same "never trap the user" rule the no-device-state block below
+        // spells out, applied to the link step. This phase used to pin the QR
+        // outright, which made the link screen the one genuinely modal place
+        // in the UI — and the worst possible place for that, because the
+        // OAuth callback can only arrive over the dial's OWN LAN. "My phone
+        // is on the wrong network" and "this dial is on the wrong network"
+        // are the two likeliest reasons to be stuck staring at this code, and
+        // the second is fixed from SCR_WIFI, which was unreachable from here.
+        // A deliberately opened menu or sub-screen stays put; everything else
+        // still falls back to the QR, so swiping back off the menu returns to
+        // the code on the next tick with nothing to re-arm.
+        screen_id_t cur = ui_router_current();
+        if (cur == SCR_MENU || cur == SCR_SETTINGS || cur == SCR_ABOUT ||
+            cur == SCR_WIFI || cur == SCR_BRIGHTNESS ||
+            cur == SCR_BRIGHTNESS_MENU || cur == SCR_UPDATE)
+            return cur;
+        return SCR_OAUTH_QR;
+    }
     case PH_READY:
     case PH_DEGRADED:
     case PH_WIFI_LOST:
@@ -1348,12 +1380,78 @@ static bool orion_refresh_schedules(void)
 
 /* ---- worker supervisor ------------------------------------------------- */
 
+// Settings' three destructive actions: each erases some NVS state and reboots.
+// There's no follow-up state commit because esp_restart() never returns — which
+// is also what makes them the only commands a mid-wait worker can safely run
+// (see wait_servicing_reboots): they need no MCP session, and nothing after the
+// call site has to cope with having been interrupted.
+static void run_reboot_cmd(const app_cmd_t *cmd)
+{
+    switch (cmd->kind) {
+    case CMD_RELINK:
+        ESP_LOGW(TAG, "settings: re-link requested — clearing Orion tokens");
+        dial_oauth_forget();
+        esp_restart();
+        break;
+    case CMD_WIFI_RESET:
+        ESP_LOGW(TAG, "settings: change-network requested — rebooting into the setup portal");
+        dial_net_request_setup();
+        esp_restart();
+        break;
+    case CMD_FACTORY_RESET:
+        ESP_LOGW(TAG, "settings: factory reset requested — erasing NVS");
+        nvs_flash_erase();
+        esp_restart();
+        break;
+    default:
+        break;
+    }
+}
+
+static bool cmd_reboots(cmd_kind_t k)
+{
+    return k == CMD_RELINK || k == CMD_WIFI_RESET || k == CMD_FACTORY_RESET;
+}
+
+// Sleep `ms`, but honour a queued reboot command instead of sleeping through it.
+//
+// This task is the only thing that drains the command queue, and it only gets
+// round to it once it has a live MCP session. So every long wait before that
+// point — the OAuth consent window (five minutes) and the retry backoff — made
+// Settings' reboot actions look broken: the screen posted the command, said
+// "Restarting…", and then just sat there. Owner-reported against Change network
+// from the link screen, which the new Wi-Fi link there made easy to reach.
+//
+// Only the reboot trio is run here; anything else needs state this task hasn't
+// built yet and stays queued, untouched, for the normal drain. Hence peek
+// rather than receive — taking a command we can't run would reorder the queue,
+// and re-posting it would spin this loop for the rest of the wait.
+static void wait_servicing_reboots(int ms)
+{
+    int64_t end = esp_timer_get_time() + (int64_t)ms * 1000;
+    for (;;) {
+        int64_t left_ms = (end - esp_timer_get_time()) / 1000;
+        if (left_ms <= 0) return;
+        app_cmd_t cmd;
+        if (!dial_cmd_peek(&cmd, (int)left_ms)) return;   // window elapsed
+        if (!cmd_reboots(cmd.kind)) {
+            // Something we can't run is parked at the head and will stay there.
+            // Serve out the rest of the wait in one sleep rather than peeking
+            // at it again and again.
+            left_ms = (end - esp_timer_get_time()) / 1000;
+            if (left_ms > 0) vTaskDelay(pdMS_TO_TICKS(left_ms));
+            return;
+        }
+        run_reboot_cmd(&cmd);   // does not return
+    }
+}
+
 // Sleep `seconds` while publishing a countdown for the error screen.
 static void backoff_wait(int seconds)
 {
     for (int s = seconds; s > 0; s--) {
         dial_state_commit(mut_retry_in, &s);
-        vTaskDelay(pdMS_TO_TICKS(1000));
+        wait_servicing_reboots(1000);
     }
     int zero = 0;
     dial_state_commit(mut_retry_in, &zero);
@@ -1447,7 +1545,13 @@ static void handle_immediate_cmd(const app_cmd_t *cmd, const oauth_disc_t *disc,
         relief_optimistic_t opt = {
             .zone = cmd->zone, .active = true, .heat = b.heat,
             .end_ms = (int64_t)time(NULL) * 1000 + (int64_t)b.minutes * 60000,
-            .prev_temp_c = pre.zones[cmd->zone].temp_c,
+            // Same "prefer the pending optimistic target" rule as
+            // dial_state_set_relief_optimistic — see its comment. The rail-push
+            // restore is queued just ahead of this command, so temp_c can still
+            // be the rail the gesture crossed.
+            .prev_temp_c = (pre.ui_temp_f[cmd->zone] >= 0)
+                               ? dial_f_to_c(pre.ui_temp_f[cmd->zone])
+                               : pre.zones[cmd->zone].temp_c,
             .optimistic = true,
         };
         dial_state_commit(mut_relief_optimistic, &opt);
@@ -1504,23 +1608,13 @@ static void handle_immediate_cmd(const app_cmd_t *cmd, const oauth_disc_t *disc,
         dial_power_inhibit(DPWR_INHIBIT_TASK, false);
         break;
     }
-    // Settings (M4) destructive actions: each erases some NVS state and
-    // reboots — there's no follow-up state commit because esp_restart()
-    // never returns.
+    // Settings (M4) destructive actions — see run_reboot_cmd. Shared with the
+    // long waits before this loop exists, so a "Restarting…" tap during setup
+    // or a retry backoff isn't stuck behind them.
     case CMD_RELINK:
-        ESP_LOGW(TAG, "settings: re-link requested — clearing Orion tokens");
-        dial_oauth_forget();
-        esp_restart();
-        break;
     case CMD_WIFI_RESET:
-        ESP_LOGW(TAG, "settings: change-network requested — rebooting into the setup portal");
-        dial_net_request_setup();
-        esp_restart();
-        break;
     case CMD_FACTORY_RESET:
-        ESP_LOGW(TAG, "settings: factory reset requested — erasing NVS");
-        nvs_flash_erase();
-        esp_restart();
+        run_reboot_cmd(cmd);
         break;
     // Software update (M6/M7), from SCR_UPDATE's "Check for updates" row.
     // Gated on clock_valid the same as the M6 auto-check above
@@ -1759,11 +1853,44 @@ static void worker_task(void *arg)
             }
             dial_state_commit(mut_oauth_url, url);
             dial_state_set_phase(PH_OAUTH_WAIT_CONSENT, NULL);
-            bool ok = dial_oauth_finish_authorize(&disc, client_id, redirect_uri, 300000);
+            // Wait out the consent window in slices, so a Change network /
+            // Re-link / Factory reset tapped from the link screen reboots now
+            // rather than in up to five minutes' time (wait_servicing_reboots).
+            // The exchange itself still runs in one go, once the code is in.
+            for (int waited = 0; waited < CONSENT_WINDOW_MS && !dial_oauth_have_code();
+                 waited += CONSENT_SLICE_MS)
+                wait_servicing_reboots(CONSENT_SLICE_MS);
+            bool got = dial_oauth_have_code();
+            // Shut the callback server down BEFORE the exchange, not after.
+            // It has done its whole job the moment the code lands, and it is
+            // not free while it lingers: httpd holds up to 7 sockets, the
+            // phone's browser leaves several of them open and keep-alive, and
+            // LWIP only has ten to give. The HTTPS POST that follows then
+            // could not get one — no DNS, no connect, "HTTP -1" with no status
+            // and no body, promptly, right after a consent that worked
+            // (owner-reported). Nothing below needs the server; the code and
+            // the PKCE verifier are already in hand.
             dial_oauth_stop_authorize();
+            bool ok = got && dial_oauth_finish_authorize(&disc, client_id, redirect_uri, 0);
             if (!ok) {
-                ESP_LOGW(TAG, "consent window elapsed (%s) — restarting authorize",
-                         dial_oauth_last_error());
+                if (!got) {
+                    // Nobody scanned in time. A fresh code is exactly the right
+                    // answer, and the QR screen is already saying what to do.
+                    ESP_LOGW(TAG, "consent window elapsed — new QR");
+                    continue;
+                }
+                // The phone consented, the code came back, and the exchange
+                // still failed. Painting a fresh QR at this point is the one
+                // thing that tells the owner nothing: they did their part, saw
+                // "Linking to Orion...", and got the code again with no reason
+                // given (owner-reported). Say what the token endpoint actually
+                // said and hold it long enough to read before re-arming.
+                const char *why = dial_oauth_last_error();
+                ESP_LOGE(TAG, "token exchange failed after consent: %s", why ? why : "(none)");
+                dial_state_set_phase(PH_DEGRADED, (why && *why) ? why
+                    : "Couldn't finish linking. The code will refresh — try again.");
+                backoff_wait(backoff_s);
+                backoff_s = (backoff_s * 2 > BACKOFF_MAX_S) ? BACKOFF_MAX_S : backoff_s * 2;
                 continue;
             }
         }
@@ -1826,7 +1953,21 @@ static void worker_task(void *arg)
     // ---- steady state: drain commands (coalescing per zone), gated poll ----
     int64_t last_poll_us      = esp_timer_get_time();
     int     poll_confirms     = 0;   // fast reads still owed after a write
-    int64_t last_sched_us     = esp_timer_get_time();
+    // Schedules are wanted as soon as the worker is up, NOT SCHED_INTERVAL_US
+    // after it. Seeding the timer with "now" (as this did) meant the first
+    // fetch landed ~30 min after every boot, and until it does sched_valid is
+    // false for both zones — so temp_write_phase() returns SLEEP_PHASE_NONE and
+    // a knob turn in Follow-schedule mode silently falls back to a plain
+    // set_zone hold instead of retargeting the phase that is actually running.
+    // The schedule engine then overwrites that hold at the next boundary, which
+    // is the reported "the dial goes back to the schedule temperature after a
+    // reflash". The night window and the pill's hold/until grammar read the
+    // same flag, so both also mis-report during that window.
+    //
+    // A deadline of 0 fetches on the first idle poll instead; a miss re-arms at
+    // SCHED_RETRY_US because orion_refresh_schedules needs a synced clock to
+    // know which weekday "tonight" is, and SNTP often hasn't landed by then.
+    int64_t sched_due_us      = 0;
     int64_t last_ota_check_us = esp_timer_get_time();   // first auto-check ~24h after boot
     int poll_failures = 0;
     for (;;) {
@@ -2170,10 +2311,12 @@ static void worker_task(void *arg)
         last_poll_us = esp_timer_get_time();
 
         // Sleep schedules change far less often than device state — piggyback
-        // on this same quiet-idle gate, just at a much longer interval.
-        if (esp_timer_get_time() - last_sched_us >= SCHED_INTERVAL_US) {
-            with_auth_retry(sched_call, NULL, &disc, client_id);   // commits inside on success
-            last_sched_us = esp_timer_get_time();
+        // on this same quiet-idle gate, just at a much longer interval. The
+        // deadline only jumps a full interval once a fetch actually succeeds
+        // (see sched_due_us above).
+        if (esp_timer_get_time() >= sched_due_us) {
+            bool got = with_auth_retry(sched_call, NULL, &disc, client_id);   // commits inside on success
+            sched_due_us = esp_timer_get_time() + (got ? SCHED_INTERVAL_US : SCHED_RETRY_US);
         }
 
         // OTA_FAILED must not be terminal (field bug: it used to stay wedged

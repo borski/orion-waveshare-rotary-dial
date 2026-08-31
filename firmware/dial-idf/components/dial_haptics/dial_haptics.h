@@ -74,6 +74,14 @@ void dial_haptics_play_soft(haptic_effect_t fx);
 // Fire an effect (non-blocking; drops if level is OFF, muted, or chip absent).
 void dial_haptics_play(haptic_effect_t fx);
 
+// Fire an effect even while knob dispatch has haptics muted. Use sparingly for
+// knob gestures where the motor pulse carries state, not just detent feedback.
+void dial_haptics_play_unmuted(haptic_effect_t fx);
+
+// Confirmation pattern for sleepy gestures: soft bump, soft bump, firm click.
+// Ignores knob-dispatch mute for the same reason as dial_haptics_play_unmuted().
+void dial_haptics_play_triple_confirm(void);
+
 // Night attenuation: true = the sleep window is active (owner asleep
 // nearby). Only actually changes anything at HAPTIC_LEVEL_AUTO — LOW/HIGH
 // are global choices the sleep window must not perturb, and OFF plays

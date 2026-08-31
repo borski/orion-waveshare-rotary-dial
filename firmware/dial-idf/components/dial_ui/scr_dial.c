@@ -12,6 +12,7 @@
 #include "dial_haptics.h"
 #include "dial_ota.h"
 #include "dial_icons.h"
+#include "esp_timer.h"
 #include <math.h>
 #include <time.h>
 
@@ -21,6 +22,16 @@ LV_FONT_DECLARE(dial_font_num_88)
 #define CY 180   // given as an absolute (x,y); we align everything to the
                  // screen's center and offset by (x-CX, y-CY).
 #define ARC_R 165
+#define BOOST_CONFIRM_MIN_MS 1000
+#define BOOST_CONFIRM_MAX_MS 2100
+// How long the setpoint is held still after a boost is cancelled. The cancel
+// is itself a turn, and a hand that has just rotated hard enough to confirm
+// one rarely stops on the exact detent that did it — without this, the tail of
+// that same gesture walks straight off the restored temperature, so the value
+// the cancel just brought back is visible for a few milliseconds and then
+// gone. A second is long enough for the restore to land and be read, short
+// enough that a deliberate follow-up adjustment doesn't feel blocked.
+#define BOOST_SETTLE_MS 1000
 
 static lv_obj_t *s_arc;
 static lv_obj_t *s_stale_dot;
@@ -70,6 +81,16 @@ static lv_obj_t *s_handle;       // setpoint drag handle — the ONLY temp touch
 #define SEG_TRAIL_OPA  LV_OPA_70 // neutral -> setting, clearly "lit" but still
                                  // a step below the active wedge
 #define SEG_ZERO_OPA   LV_OPA_50 // neutral landmark, quieter than a real setting
+
+// The setpoint numeral's opacity while the side is OFF, on either face.
+// Pitched at the ring's own rest tier (SEG_REST_OPA) so the numeral joins the
+// chassis rather than sitting above it: once the ring has quieted, this is the
+// last thing that could still read as a live setting. It also has to lose
+// decisively to the power button, which keeps a full-strength ink_secondary
+// ring and glyph while off — the power button is the only thing worth touching
+// on an off face, so it must be the loudest, both at rest and when it breathes
+// at a blocked adjustment.
+#define NUM_STANDBY_OPA LV_OPA_30
 
 // Where the bed actually IS: a thin underline hugging the segment it currently
 // sits under. The measurement never joins the segment band itself — those 21
@@ -123,33 +144,22 @@ static float seg_center(int i)
 }
 
 /*
- * Water level, drawn as a VALUE STEP rather than a texture: no stripes, no
- * second material — the arc says where the water is purely by changing the
- * value of what's already there. One overlay arc, two configurations, and the
- * boundary between them IS the water level:
+ * The measured water temperature is reported in two places, and deliberately
+ * NOT as a mark on the setpoint's own band.
  *
- *   HEATING  water below the setpoint, so the water sits UNDER the accent fill.
- *            That stretch of fill is deepened (a `bg` wash over it), leaving the
- *            rest of the fill bright: dark = water that's really there, bright =
- *            the heat still to add.
- *   COOLING  water above the setpoint, so it overshoots the fill. The overshoot
- *            is the accent at low opacity over the bare track: a ghost of the
- *            fill, which is exactly what it is — heat that has to leave.
+ *   RELATIVE  an inner underline (seg_tick_render) on its own radius, hugging
+ *             whichever of the 21 segments the bed is currently under.
+ *   BOTH      the WATER caption under the side name, which keeps its degree
+ *             sign on every face.
  *
- * There is nothing to alias and nothing to animate, and the water never becomes
- * a third color to decode: it's the same accent, one step down in value.
- *
- * The under-fill stretch is not deepened when cooling — the water level there is
- * already above the setpoint by definition, so the only thing worth marking is
- * where it overshoots to.
- *
- * Recomputed only when a poll moves the water or the user moves the target.
+ * An earlier absolute-mode design washed the arc itself between the setpoint
+ * and the water (a "value step"): same band, same accent, one step down in
+ * value. On hardware that reads as a second mark competing with the setpoint
+ * fill for the same meaning — the owner sees one arc with two boundaries on it
+ * and has to work out which one is the setting. It has been removed; absolute
+ * mode's arc now carries the setpoint and nothing else, which is the same
+ * separation the relative ring already had.
  */
-#define LEVEL_OPA_UNDER  77     // ~30%: `bg` wash deepening the fill  (heating)
-#define LEVEL_OPA_OVER   82     // ~32%: accent ghost over the track   (cooling)
-
-static lv_obj_t  *s_level;              // the value-step overlay arc
-static lv_color_t s_level_accent;       // cached: the drag path has no state snapshot
 static float      s_actual_f = -1.0f;   // measured water temp, °F; <0 = unknown
 
 static lv_obj_t *s_name_lbl;
@@ -195,6 +205,39 @@ static bool s_rel;
 // (owner decision) so a stray turn can't silently rewrite the setpoint by up
 // to 2.5°C while the pill still counts down. Set from apply_palette_and_state.
 static bool s_relief_active;
+static bool s_relief_heat;
+static int64_t s_relief_cancel_us;
+// When the last boost cancel fired; starts the BOOST_SETTLE_MS window during
+// which detents are swallowed. 0 = no window pending.
+static int64_t s_boost_settle_us;
+static int s_boost_arm_dir;
+static int64_t s_boost_arm_us;
+
+// Where the turn that walked into the rail STARTED. Every detent that moves the
+// setpoint commits it (on_knob's post_temp), so a spin from level -2 down to the
+// -10 rail writes -3,-4,...,-10 on the way past. Those are transitional marks —
+// the user was travelling, not choosing — but the last of them is what the bed
+// (and then start_thermal_relief's own "previous_temp") is holding at the
+// instant a rail-push boost fires, which is why cancelling a boost used to drop
+// the side at -10 instead of putting it back where it was.
+//
+// -1 = nothing to restore: either the run never reached a rail, or the setpoint
+// was ALREADY parked there before the gesture began, in which case the rail is
+// a genuine settled choice and must not be second-guessed. Belongs to the arm's
+// lifecycle, so clear_boost_arm() drops it.
+static int     s_rail_from_f = -1;
+static int64_t s_rail_from_us;
+// Detents closer together than this are one continuous turn; a longer pause
+// means the user stopped, so wherever they stopped is settled and becomes the
+// origin of the next run.
+#define KNOB_RUN_GAP_MS 900
+// ...and a rail reached longer ago than this stopped being somewhere the user
+// was passing through. Generous next to the ~1-2s arm/confirm gesture, short
+// enough that a rail left sitting for a while reverts to being a real setpoint.
+#define RAIL_FROM_TTL_MS 10000
+static int     s_run_from_f = -1;   // setpoint before the current run of detents
+static int     s_run_dir;
+static int64_t s_run_last_us;
 
 // Current configured arc range (°F). Absolute mode keeps the shipped 55–110;
 // relative mode widens to 50–113 so all 21 levels are reachable (owner: widen
@@ -300,21 +343,52 @@ static void chevron_stop(void)
     lv_obj_set_style_opa(s_pill_glyph, LV_OPA_100, 0);
 }
 
-/* ---- water level: value step over the arc ------------------------------ */
-
-// Temperature -> degrees into the arc's own 0..270 sweep (rotation adds 135).
-// Same mapping the setpoint indicator uses, so the level and the fill land on
-// one scale. Uses the CURRENT arc range so the water overlay stays aligned with
-// the (mode-dependent) indicator — 55–110 in absolute, 50–113 in relative.
-static uint16_t level_angle(float f)
+// Power-button hint: two slow breathes when something tries to change the
+// temperature while the zone is off. Same ping-pong ease_in_out vocabulary as
+// the chevron above, but finite — it answers one input rather than
+// advertising an ongoing state — and pointed at the control that unblocks
+// things instead of at the one that was just refused.
+static void power_hint_pulse(void)
 {
-    if (f < s_arc_min) f = s_arc_min;
-    if (f > s_arc_max) f = s_arc_max;
-    float d = 270.0f * (f - s_arc_min) / (float)(s_arc_max - s_arc_min);
-    return (uint16_t)lroundf(d);
+    if (!s_power_btn) return;
+    // Already breathing: let it finish. Restarting per detent would pin the
+    // animation to its first frame for the whole of a spin.
+    if (lv_anim_get(s_power_btn, set_opa_cb)) return;
+    lv_obj_set_style_opa(s_power_btn, LV_OPA_COVER, 0);
+    lv_anim_t a;
+    lv_anim_init(&a);
+    lv_anim_set_var(&a, s_power_btn);
+    lv_anim_set_exec_cb(&a, set_opa_cb);
+    lv_anim_set_values(&a, LV_OPA_COVER, LV_OPA_40);
+    lv_anim_set_time(&a, 260);
+    lv_anim_set_playback_time(&a, 260);
+    lv_anim_set_repeat_count(&a, 2);
+    lv_anim_set_path_cb(&a, lv_anim_path_ease_in_out);
+    lv_anim_start(&a);
 }
 
-// Point the arc (and thus level_angle) at the range the current scale needs.
+// The setpoint stays on screen while a zone is off (dimmed, as the rest of
+// the face is), which is exactly what made it read as adjustable in a dark
+// room. Every path that would move it asks this first.
+static bool zone_is_off(void)
+{
+    app_state_t st;
+    dial_state_get(&st);
+    return !st.zones[s_zone].on;
+}
+
+/* ---- water level ------------------------------------------------------- */
+
+// The absolute face used to wash the arc between the setpoint and the measured
+// water temperature. It is gone: on the device that wash reads as a second,
+// competing mark on the same band as the setpoint fill, which is exactly the
+// confusion the relative face avoids by giving the measurement its own inner
+// underline on its own radius (seg_tick_render). The live reading is reported
+// by that underline in relative mode, and by the WATER caption in both — the
+// caption keeps its degree sign on every face, so no absolute-mode information
+// is lost with the wash.
+
+// Point the arc at the range the current scale needs.
 // Cheap and idempotent — only touches the widget when the range actually
 // changes (a mode toggle OR a fresh device-reported range landing), so it
 // never disturbs an in-progress drag. Absolute mode's rails come from the
@@ -400,36 +474,6 @@ static int value_from_point(lv_point_t p)
     return s_arc_min + (int)lroundf(frac * (float)(s_arc_max - s_arc_min));
 }
 
-static void level_render(int target_f)
-{
-    if (!s_level) return;
-    // Relative mode draws the water nowhere: the level ring's segments are a
-    // scale of settings, not of degrees, so a continuous water boundary laid
-    // over them would be measuring one thing against another. The measurement
-    // is not lost — it gets the inner underline (seg_tick_render) plus the WATER
-    // caption, which keeps its degree sign in every mode.
-    if (s_rel || s_actual_f < 0) {              // no measurement yet
-        lv_obj_add_flag(s_level, LV_OBJ_FLAG_HIDDEN);
-        return;
-    }
-
-    uint16_t a_water = level_angle(s_actual_f);
-    uint16_t a_set   = level_angle((float)target_f);
-    bool cooling = a_water > a_set;
-
-    uint16_t a0 = cooling ? a_set : 0;
-    uint16_t a1 = a_water;
-    if (a1 <= a0 + 1) {                         // at target: no step to draw
-        lv_obj_add_flag(s_level, LV_OBJ_FLAG_HIDDEN);
-        return;
-    }
-
-    lv_obj_set_style_arc_color(s_level, cooling ? s_level_accent : PAL()->bg, LV_PART_INDICATOR);
-    lv_obj_set_style_arc_opa(s_level, cooling ? LEVEL_OPA_OVER : LEVEL_OPA_UNDER, LV_PART_INDICATOR);
-    lv_arc_set_angles(s_level, a0, a1);
-    lv_obj_clear_flag(s_level, LV_OBJ_FLAG_HIDDEN);
-}
-
 /* ---- level ring: the 21 segments -------------------------------------- */
 
 // The ring's own colour ramp: accent_cool at level −10, through
@@ -467,9 +511,14 @@ static lv_color_t seg_ramp(int level, const dial_palette_t *pal)
 
 // How loud a LIT segment is allowed to be, mirroring the arc indicator's own
 // state tiers (see apply_palette_and_state): COVER normally, LV_OPA_30 for a
-// standby zone, transparent when offline. Cached like s_level_accent because
+// standby zone, transparent when offline. Cached because
 // the drag and detent paths re-render without a fresh state snapshot.
 static lv_opa_t s_seg_lit_opa = LV_OPA_COVER;
+
+// Whether the zone was ON at the last state snapshot. Cached for the same
+// reason as s_seg_lit_opa: seg_tick_render runs from the drag and detent paths
+// too, which have no snapshot to consult.
+static bool s_seg_zone_on = true;
 
 // Which segment the bed is currently sitting under. This DOES round the
 // measurement onto the ring's 21 stops, which the earlier free-floating tick
@@ -499,7 +548,16 @@ static void seg_tick_render(const dial_palette_t *pal)
     // Follows the segments' state tier: an offline zone has no live reading to
     // report, so the underline goes with the rest of the ring rather than
     // hanging there asserting a stale number.
-    if (!s_rel || s_seg_lit_opa == LV_OPA_TRANSP || !seg_water_level(s_actual_f, &lvl)) {
+    //
+    // A zone that is switched OFF drops it too, even though the reading is
+    // still arriving and still true. Dimming it was not enough on hardware:
+    // a live mark tracking the water up the ring is the single most active-
+    // looking thing on the face, and on a dark bedside dial that is read as
+    // "this side is running" by someone who just turned it off. Off should
+    // look off — the WATER caption still carries the number for anyone who
+    // wants it.
+    if (!s_rel || !s_seg_zone_on ||
+        s_seg_lit_opa == LV_OPA_TRANSP || !seg_water_level(s_actual_f, &lvl)) {
         lv_obj_add_flag(s_seg_tick, LV_OBJ_FLAG_HIDDEN);
         return;
     }
@@ -534,7 +592,12 @@ static void segments_render(int target_f)
     // material from anything else — only louder or quieter:
     //   rest   the whole scale, dim enough to read as chassis
     //   trail  neutral -> the setting, so distance from neutral is a length
-    //   active full strength and 6px fatter
+    //   active full strength and 6px fatter — but only while the side is ON.
+    //          Off, the wedge keeps its colour and position but drops back to
+    //          the ordinary stroke: the fat segment is the loudest mark on the
+    //          face and it kept reading as "this side is running" to someone
+    //          who had just switched it off. Off, the ring should say what the
+    //          setting IS, not press on it.
     lv_opa_t trail_opa = (lv_opa_t)((int)SEG_TRAIL_OPA * (int)s_seg_lit_opa / 255);
     lv_opa_t rest_opa  = (lv_opa_t)((int)SEG_REST_OPA  * (int)s_seg_lit_opa / 255);
 
@@ -551,7 +614,7 @@ static void segments_render(int target_f)
         lv_opa_t   opa;
         lv_coord_t w = SEG_W;
         if (active) {
-            opa = s_seg_lit_opa;  w = SEG_W_ACTIVE;
+            opa = s_seg_lit_opa;  w = s_seg_zone_on ? SEG_W_ACTIVE : SEG_W;
         } else if (trail) {
             opa = trail_opa;
         } else if (l == 0) {
@@ -632,6 +695,7 @@ static void apply_palette_and_state(const app_state_t *st)
     // power disc below stays kind-based (boost doesn't change on/off meaning).
     bool relief = z->relief_active;
     s_relief_active = relief;    // knob guard reads this without a fresh snapshot
+    s_relief_heat = z->relief_heat;   // decides which way the cancel gesture turns
     lv_color_t relief_accent = z->relief_heat ? pal->accent_heat : pal->accent_cool;
     lv_color_t arc_accent = relief ? relief_accent : accent;
 
@@ -643,8 +707,8 @@ static void apply_palette_and_state(const app_state_t *st)
     // sweep outright, and leaving the track underneath would be worse than
     // redundant — it paints straight through the 1° gaps and welds the 21
     // segments back into one bar. The widget itself stays alive and ranged
-    // (configure_arc_range above) because level_angle and the drag path still
-    // read its geometry.
+    // (configure_arc_range above) because the drag path still reads its
+    // geometry.
     lv_obj_set_style_arc_color(s_arc, pal->track, LV_PART_MAIN);
     lv_obj_set_style_arc_opa(s_arc, s_rel ? LV_OPA_TRANSP : LV_OPA_70, LV_PART_MAIN);
     lv_obj_set_style_arc_color(s_arc, arc_accent, LV_PART_INDICATOR);
@@ -655,15 +719,12 @@ static void apply_palette_and_state(const app_state_t *st)
     // inventing its own, so an offline or standby zone quiets identically in
     // both scales — then the arc's own indicator is switched off.
     s_seg_lit_opa = indic_opa;
+    s_seg_zone_on = z->on;
     lv_obj_set_style_arc_opa(s_arc, s_rel ? LV_OPA_TRANSP : indic_opa, LV_PART_INDICATOR);
 
-    // Water level. Cached in °F (and the accent with it) so a drag or a detent
-    // can re-draw the step without waiting for the next poll — the water doesn't
-    // move while you turn the knob, but the setpoint does, and that's what
-    // decides which side of it the water is on.
+    // Water reading. Cached in °F so the drag and detent paths can re-draw the
+    // relative face's underline without waiting for the next poll.
     s_actual_f = (z->actual_c >= 0) ? (float)dial_c_to_f(z->actual_c) : -1.0f;
-    s_level_accent = arc_accent;
-    level_render(s_shown_f);
     segments_render(s_shown_f);
 
     // Side name + identity underline.
@@ -671,25 +732,60 @@ static void apply_palette_and_state(const app_state_t *st)
     apply_identity(pal, night);
 
     // Water caption — display-only °C conversion when units_c (M4); the
-    // store keeps actual_c as-is either way.
+    // store keeps actual_c as-is either way. Drops to the same rest tier as
+    // the numeral while the side is off: it is a live measurement, so leaving
+    // it at full strength would make it the brightest text on an off face and
+    // undo the rest of the quieting.
     lv_obj_set_style_text_color(s_water_lbl, pal->ink_secondary, 0);
-    lv_obj_set_style_text_opa(s_water_lbl, LV_OPA_80, 0);
+    lv_obj_set_style_text_opa(s_water_lbl, z->on ? LV_OPA_80 : NUM_STANDBY_OPA, 0);
     char water[16];
     if (z->actual_c < 0) snprintf(water, sizeof(water), "WATER --");
     else if (st->units_c) snprintf(water, sizeof(water), "WATER %.1f\xC2\xB0", z->actual_c);
     else snprintf(water, sizeof(water), "WATER %d\xC2\xB0", dial_c_to_f(z->actual_c));
     lv_label_set_text(s_water_lbl, water);
 
-    // Setpoint numeral — ink_primary always (never state-tinted); dimmed only
-    // for OFFLINE (design-spec.md's "numeral whose color never lies").
-    lv_obj_set_style_text_color(s_temp_lbl, pal->ink_primary, 0);
-    lv_obj_set_style_text_opa(s_temp_lbl, (kind == ZK_OFFLINE) ? 115 : LV_OPA_COVER, 0);
+    // Setpoint numeral — ink_primary always (never state-tinted); dimmed for
+    // OFFLINE (design-spec.md's "numeral whose color never lies") and for a
+    // side that is switched off, on either face.
+    //
+    // Once the ring has gone quiet around it, the numeral is the last thing on
+    // an off face still at full strength, and a bright "72 °F" or "+2 LEVEL"
+    // still reads as a setting being held. It also has to lose to the power
+    // button, which is the only thing worth touching on an off side and so must
+    // be the clearest call to action — at rest and when it breathes at a
+    // blocked adjustment.
+    //
+    // Dimming is the honest reading: the value is real and worth showing, it
+    // just isn't in effect. It is a dim, not a colour change, so the numeral
+    // still never lies about WHICH value it is.
+    lv_opa_t num_opa = (kind == ZK_OFFLINE) ? 115
+                     : !z->on               ? NUM_STANDBY_OPA
+                                            : LV_OPA_COVER;
+    //
+    // The one thing in that slot which ISN'T a numeral is the boost icon
+    // (render_numeral): it's a glyph, not a value, so "never state-tinted"
+    // doesn't bind it. It wears the same relief accent as the pill and the
+    // arc-end icon that started the boost, so the three read as one state
+    // instead of three unrelated marks.
+    bool boost_glyph = s_rel && relief;
+    lv_obj_set_style_text_color(s_temp_lbl, boost_glyph ? relief_accent : pal->ink_primary, 0);
+    lv_obj_set_style_text_opa(s_temp_lbl, num_opa, 0);
     lv_obj_set_style_text_color(s_unit_lbl, pal->ink_secondary, 0);
+    // The suffix rides with the numeral — they are one typographic unit, and a
+    // full-strength "LEVEL" beside a dimmed "+2" reads as a rendering fault
+    // rather than as a state.
+    lv_obj_set_style_text_opa(s_unit_lbl, num_opa, 0);
     // Relative mode has no unit — the suffix names the quantity instead (mirrors
     // scr_boost's "MIN"). The measured-water caption above keeps its degree, so
     // an absolute reference stays on the face in every mode.
     if (st->rel_mode) lv_label_set_text(s_unit_lbl, "LEVEL");
     else              lv_label_set_text(s_unit_lbl, st->units_c ? "\xC2\xB0" "C" : "\xC2\xB0" "F");
+    // "LEVEL" names the quantity the numeral is showing, and the boost icon
+    // isn't one — left up, the suffix would be captioning a flame. It rides
+    // with the numeral (see above), so it leaves with it and returns when the
+    // boost ends.
+    if (boost_glyph) lv_obj_add_flag(s_unit_lbl, LV_OBJ_FLAG_HIDDEN);
+    else             lv_obj_clear_flag(s_unit_lbl, LV_OBJ_FLAG_HIDDEN);
 
     // Setpoint handle: themed to the live accent and parked at the setpoint.
     // Left alone while the user is dragging it — they own s_shown_f then, and a
@@ -948,6 +1044,14 @@ static void apply_palette_and_state(const app_state_t *st)
     // Dial - Menu on a single-zone one, re-centered so the pair sits
     // symmetric. Filled = the face this screen instance is showing; scr_dial
     // is never the menu face, so that dot always tracks.
+    //
+    // The partner dot stays put while this side is on, even though on_gesture
+    // won't walk to it then. That looks like a violation of
+    // dial_dots_layout's "no dot for a face the swipe can't reach" rule, but
+    // the rule is about TOPOLOGY — a single-zone topper has no partner, ever.
+    // A locked-out side still has one; it's a momentary lockout, not a
+    // different bed. Dropping the dot would re-center the row on every power
+    // tap, which is visible jitter, and would claim the topper changed shape.
     dial_dots_layout(st, s_dot_b, s_dot_a, s_dot_menu);
     lv_obj_set_style_bg_color(s_dot_b, s_zone == ZONE_B ? pal->ink_secondary : pal->track, 0);
     lv_obj_set_style_bg_color(s_dot_a, s_zone == ZONE_A ? pal->ink_secondary : pal->track, 0);
@@ -1000,6 +1104,22 @@ static void apply_palette_and_state(const app_state_t *st)
 // keeps °F, or a one-decimal °C conversion when s_units_c (M4).
 static void render_numeral(int temp_f)
 {
+    // A running boost owns the hero slot on the relative face. The setpoint is
+    // pinned to a rail for the duration and the knob is inert, so "+10"/"-10"
+    // is a number the user can neither change nor learn anything from — it
+    // reads as an extreme setting someone dialled in rather than as relief that
+    // will expire on its own. The flame/snow3 that started the boost says what
+    // is actually happening, and dial_font_icons_64 puts it at the numeral's
+    // own optical size (64px ~= this face's 65px digit height).
+    //
+    // Absolute mode deliberately keeps its number: there the setpoint is a real
+    // temperature the user still wants to read, not a rail.
+    if (s_rel && s_relief_active) {
+        lv_obj_set_style_text_font(s_temp_lbl, &dial_font_icons_64, 0);
+        lv_label_set_text(s_temp_lbl, s_relief_heat ? DIAL_ICON_FLAME : DIAL_ICON_SNOW3);
+        return;
+    }
+    lv_obj_set_style_text_font(s_temp_lbl, &dial_font_num_88, 0);
     char t[8];
     if (s_rel) {
         int lvl = dial_rel_from_f(temp_f);
@@ -1023,6 +1143,69 @@ static void post_temp_for(zone_idx_t zone, int temp_f)
 
 static void post_temp(int temp_f) { post_temp_for(s_zone, temp_f); }
 
+static void clear_boost_arm(void)
+{
+    s_boost_arm_dir = 0;
+    s_boost_arm_us = 0;
+    s_rail_from_f = -1;
+}
+
+static void start_rail_boost(zone_idx_t zone, bool heat)
+{
+    uint8_t minutes = dial_state_get_boost_minutes();
+    // Put the settled setpoint back before the boost starts. The queue keeps
+    // the order (the worker's drain coalesces temps, then handles the boost as
+    // the pending command behind them), so this write lands first and
+    // start_thermal_relief records THIS as previous_temp — which is what the
+    // server hands back, and what cancelling restores. Without it the boost
+    // captures the rail the gesture just walked across.
+    if (s_rail_from_f >= 0 &&
+        esp_timer_get_time() - s_rail_from_us <= (int64_t)RAIL_FROM_TTL_MS * 1000)
+        post_temp_for(zone, s_rail_from_f);
+    if (zone == s_zone) s_shown_f = heat ? s_arc_max : s_arc_min;
+    clear_boost_arm();
+    dial_state_set_relief_optimistic(zone, true, heat,
+                                     (int64_t)time(NULL) * 1000 + (int64_t)minutes * 60000);
+    app_cmd_t cmd = { .kind = CMD_BOOST_START, .zone = zone,
+                      .a = heat ? 1 : 0, .b = minutes };
+    dial_cmd_post(&cmd);
+}
+
+static void cancel_boost(void)
+{
+    // Open the settle window before the state change, so the very next detent
+    // of the gesture that cancelled sees it (see BOOST_SETTLE_MS).
+    s_boost_settle_us = esp_timer_get_time();
+    dial_state_set_relief_optimistic(-1, false, false, 0);
+    app_cmd_t cmd = { .kind = CMD_BOOST_CANCEL };
+    dial_cmd_post(&cmd);
+}
+
+static bool handle_rail_boost_arm(int dir)
+{
+    int64_t now = esp_timer_get_time();
+    if (s_boost_arm_dir == dir) {
+        int64_t elapsed_us = now - s_boost_arm_us;
+        if (elapsed_us < (int64_t)BOOST_CONFIRM_MIN_MS * 1000) {
+            return true;
+        }
+        if (elapsed_us <= (int64_t)BOOST_CONFIRM_MAX_MS * 1000) {
+            dial_haptics_play_triple_confirm();
+            start_rail_boost(s_zone, dir > 0);
+            return true;
+        }
+    }
+    if (s_boost_arm_dir == -dir) {
+        clear_boost_arm();
+        dial_haptics_play_soft(HAPTIC_STOP);
+        return true;
+    }
+    s_boost_arm_dir = dir;
+    s_boost_arm_us = now;
+    dial_haptics_play_soft(HAPTIC_STOP);
+    return true;
+}
+
 // Setpoint handle drag. The handle is the ONLY temperature touch target: the
 // arc itself is display-only (non-clickable), so a press on the ring away from
 // the handle — or anywhere in the centre — falls through to the screen and can
@@ -1041,12 +1224,21 @@ static void handle_event_cb(lv_event_t *e)
 
     if (code == LV_EVENT_PRESSED) {
         if (s_relief_active) return;      // handle is inert during a boost, like the knob
+        // ...and inert while the zone is off, for the same reason the knob is.
+        // Leaving s_dragging false makes PRESSING/RELEASED fall out at the
+        // guard below, so the wedge never moves and nothing is posted. Visual
+        // only here: the finger is already on the glass looking at the screen,
+        // so the power button's breathe is the whole message.
+        if (zone_is_off()) {
+            power_hint_pulse();
+            return;
+        }
         s_dragging = true;
         s_press_f = s_shown_f;
         dial_state_stamp_input();
         return;
     }
-    if (!s_dragging) return;              // a press that didn't start a drag (relief)
+    if (!s_dragging) return;              // a press that didn't start a drag (relief, or off)
 
     if (code == LV_EVENT_PRESSING) {
         lv_indev_t *indev = lv_indev_get_act();
@@ -1054,13 +1246,12 @@ static void handle_event_cb(lv_event_t *e)
         lv_point_t p;
         lv_indev_get_point(indev, &p);
         int f = value_from_point(p);
-        // Live feedback: the fill, numeral (nearest level in relative), water
-        // step and handle all follow the finger; nothing is committed until
+        // Live feedback: the fill, numeral (nearest level in relative), ring
+        // and handle all follow the finger; nothing is committed until
         // release (matches the old arc-drag behaviour).
         s_shown_f = f;
         lv_arc_set_value(s_arc, f);
         render_numeral(f);
-        level_render(f);
         segments_render(f);
         position_handle(f);
         dial_state_stamp_input();
@@ -1075,11 +1266,18 @@ static void handle_event_cb(lv_event_t *e)
         s_shown_f = f;
         lv_arc_set_value(s_arc, f);
         render_numeral(f);
-        level_render(f);
         segments_render(f);
         position_handle(f);
     }
-    if (f != s_press_f) post_temp_for(zone, f);   // a tap that didn't move commits nothing
+    if (f == s_press_f) return;   // a tap that didn't move commits nothing
+    // Always commit, rails included. value_from_point() clamps into
+    // [s_arc_min, s_arc_max], so "at the rail" and "past the rail" are the same
+    // value here — there is no past to detect, and treating the rail as a Boost
+    // trigger made the coldest and hottest setpoints impossible to drag to.
+    // The rail-push Boost stays a knob gesture, where continued turning through
+    // a quiet window expresses intent that a clamped drag cannot. On the touch
+    // path the snowflake and flame icons already start a Boost in one tap.
+    post_temp_for(zone, f);
 }
 
 // Tap the ambient "Update available" notice (only clickable while it's
@@ -1166,11 +1364,7 @@ static void pill_event_cb(lv_event_t *e)
     (void)e;
     if (!s_relief_active) return;
     dial_haptics_play(HAPTIC_CONFIRM);
-    // Optimistic FIRST, from this task: the worker commits too, but it may be
-    // mid-poll and the queued command would then land seconds later.
-    dial_state_set_relief_optimistic(-1, false, false, 0);   // device-wide, like the call itself
-    app_cmd_t cmd = { .kind = CMD_BOOST_CANCEL };
-    dial_cmd_post(&cmd);
+    cancel_boost();
 }
 
 // Long-press the POWER DISC (§2 — quick-actions' screen-wide long-press is
@@ -1227,6 +1421,9 @@ static void create(lv_obj_t *scr, void *arg)
     s_units_c = false;   // on_state (called right after create) sets the real value
     s_rel = false;
     s_relief_active = false;
+    s_relief_heat = false;
+    s_relief_cancel_us = 0;
+    clear_boost_arm();
     s_dragging = false;
     s_arc_min = s_arc_max = -1;   // force configure_arc_range() on this arc
     const dial_palette_t *pal = PAL();
@@ -1251,23 +1448,6 @@ static void create(lv_obj_t *scr, void *arg)
     // to the screen so they can be swipes/long-presses; the discrete handle
     // below is the only thing that sets temperature.
     lv_obj_clear_flag(s_arc, LV_OBJ_FLAG_CLICKABLE);
-
-    // #4 Water level: a value-step overlay sharing the arc's exact geometry,
-    // created after it so it lands on top of the fill. Rounded caps to match
-    // every other arc on the face — a square end read as a different material
-    // sitting on the ring rather than as part of it.
-    s_level = lv_arc_create(scr);
-    lv_obj_set_size(s_level, 2 * ARC_R, 2 * ARC_R);
-    lv_obj_center(s_level);
-    lv_arc_set_rotation(s_level, 135);
-    lv_arc_set_bg_angles(s_level, 0, 270);
-    lv_arc_set_angles(s_level, 0, 0);
-    lv_obj_set_style_arc_opa(s_level, LV_OPA_TRANSP, LV_PART_MAIN);   // no second track
-    lv_obj_set_style_arc_width(s_level, 16, LV_PART_INDICATOR);
-    lv_obj_set_style_arc_rounded(s_level, true, LV_PART_INDICATOR);
-    lv_obj_remove_style(s_level, NULL, LV_PART_KNOB);
-    lv_obj_clear_flag(s_level, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_add_flag(s_level, LV_OBJ_FLAG_HIDDEN);   // until the first measurement
 
     // Level ring — 21 segments over the arc's own sweep, one per level, drawn
     // only in relative mode (segments_render). Created here, between the arc
@@ -1430,7 +1610,7 @@ static void create(lv_obj_t *scr, void *arg)
 
     // Explicit z-order guarantee (owner, on hardware: "the boost icons dont
     // sit above the arc when its on"). Creation order already puts these
-    // four objects after s_arc/s_level/s_zero_notch (all created above) —
+    // four objects after s_arc/s_zero_notch (all created above) —
     // verified against rendered pixels too: the glyph's own texture is
     // visible layered over the fill's rounded end-cap at the cool end in
     // dial.png, not replaced by solid fill colour, so nothing here was
@@ -1688,15 +1868,17 @@ static void destroy(void)
     if (s_num_box)    lv_anim_del(s_num_box, NULL);
     if (s_arc)        lv_anim_del(s_arc, NULL);
     if (s_pill_glyph) lv_anim_del(s_pill_glyph, NULL);
+    if (s_power_btn)  lv_anim_del(s_power_btn, NULL);
     if (s_stale_dot)  lv_anim_del(s_stale_dot, NULL);
     if (s_boost_timer) { lv_timer_del(s_boost_timer); s_boost_timer = NULL; }
 
     s_actual_f = -1.0f;
 
-    s_level = NULL;
     for (int i = 0; i < SEG_N; i++) s_seg[i] = NULL;
     s_seg_tick = NULL;
     s_seg_lit_opa = LV_OPA_COVER;
+    s_seg_zone_on = true;
+    s_boost_settle_us = 0;
     s_handle = NULL;
     s_dragging = false;
     s_arc = s_stale_dot = s_name_lbl = NULL;
@@ -1772,13 +1954,79 @@ static bool on_knob(int detents)
 {
     if (!s_arc || s_shown_f < 0) return false;
 
+    // Powered off: the temperature is not adjustable, so nothing here moves
+    // the wedge, posts a setpoint, or arms a rail Boost. Turning used to do
+    // all three against a zone that isn't running — in the dark that reads as
+    // a working control that quietly does nothing. Consume the detent with
+    // the same soft stop pulse a range stop gives (this is the same "that
+    // input went nowhere" family) and breathe the power button so the eye
+    // lands on what unblocks it. clear_boost_arm() so an arm can't survive a
+    // power-off and confirm itself later.
+    if (zone_is_off()) {
+        clear_boost_arm();
+        power_hint_pulse();
+        dial_haptics_play_soft(HAPTIC_STOP);
+        return true;
+    }
+
     // A boost is a modal thing you started deliberately (owner decision): while
     // relief is active the knob is inert, so a stray detent can't rewrite the
     // setpoint under the counting-down pill. Consumed (returns true) with a
-    // stop cue, never applied.
+    // stop cue, never applied. The exception is the cancel gesture, which is
+    // the mirror of the one that started it: a heat boost (armed by pushing
+    // right) cancels leftward, a cool boost cancels rightward.
     if (s_relief_active) {
+        clear_boost_arm();
+        int cancel_dir = s_relief_heat ? -1 : 1;
+        if (((detents > 0) ? 1 : -1) == cancel_dir) {
+            int64_t now = esp_timer_get_time();
+            if (s_relief_cancel_us) {
+                int64_t elapsed_us = now - s_relief_cancel_us;
+                if (elapsed_us < (int64_t)BOOST_CONFIRM_MIN_MS * 1000) {
+                    return true;
+                }
+                if (elapsed_us <= (int64_t)BOOST_CONFIRM_MAX_MS * 1000) {
+                    s_relief_cancel_us = 0;
+                    dial_haptics_play_triple_confirm();
+                    cancel_boost();
+                    return true;
+                }
+            }
+            s_relief_cancel_us = now;
+            dial_haptics_play_soft(HAPTIC_STOP);
+            return true;
+        } else {
+            s_relief_cancel_us = 0;
+        }
         dial_haptics_play_soft(HAPTIC_STOP);
         return true;
+    }
+
+    if (s_boost_arm_dir && ((detents > 0) ? 1 : -1) == -s_boost_arm_dir) {
+        clear_boost_arm();
+        dial_haptics_play_soft(HAPTIC_STOP);
+        return true;
+    }
+
+    // The tail of the cancelling turn. Reaching here means relief is already
+    // off, so without this the remaining detents of that same gesture would be
+    // ordinary setpoint moves and would walk off the temperature the cancel
+    // just restored — the restore would flash up and immediately be overwritten
+    // by the hand that asked for it. Swallow them for BOOST_SETTLE_MS, with the
+    // same soft stop cue every other "that input went nowhere" path uses.
+    //
+    // Deliberately not refreshed per detent: this is a fixed window from the
+    // cancel, not an idle timeout, so leaning on the knob can't extend it
+    // indefinitely. Run tracking is left alone too — s_run_last_us is older
+    // than the whole boost by now, so the first detent after the window opens
+    // a fresh run from the restored value, which is exactly the origin a
+    // subsequent rail-push boost should restore.
+    if (s_boost_settle_us) {
+        if (esp_timer_get_time() - s_boost_settle_us < (int64_t)BOOST_SETTLE_MS * 1000) {
+            dial_haptics_play_soft(HAPTIC_STOP);
+            return true;
+        }
+        s_boost_settle_us = 0;
     }
 
     // Relative: one detent = exactly one level in the turned direction, from
@@ -1798,21 +2046,61 @@ static bool on_knob(int detents)
         if (nf > s_arc_max) nf = s_arc_max;
     }
     if (nf == s_shown_f) {                          // pinned at the range stop
-        dial_haptics_play_soft(HAPTIC_STOP);
+        if (detents < 0 && nf <= s_arc_min) handle_rail_boost_arm(-1);
+        else if (detents > 0 && nf >= s_arc_max) handle_rail_boost_arm(1);
+        else {
+            clear_boost_arm();
+            dial_haptics_play_soft(HAPTIC_STOP);
+        }
         int dir = detents > 0 ? 1 : -1;
         anim_nudge(s_num_box, dir);
         anim_nudge(s_arc, dir);
         return true;
     }
 
+    // Track where this continuous turn began, before the detent below moves
+    // the setpoint off it — that origin is the settled value a rail-push boost
+    // has to restore (see s_rail_from_f).
+    {
+        int dir = detents > 0 ? 1 : -1;
+        int64_t now = esp_timer_get_time();
+        if (dir != s_run_dir || now - s_run_last_us > (int64_t)KNOB_RUN_GAP_MS * 1000)
+            s_run_from_f = s_shown_f;
+        s_run_dir = dir;
+        s_run_last_us = now;
+    }
+
     lv_arc_set_value(s_arc, nf);
     s_shown_f = nf;
     render_numeral(nf);
-    level_render(nf);
     segments_render(nf);
     position_handle(nf);
     anim_zoom_bump(s_temp_lbl);
+    // A detent that MOVES the setpoint always commits it, including the one
+    // that lands exactly on a rail — arriving at the rail is a legitimate
+    // setpoint, and skipping the post here left the face showing the rail
+    // while the bed stayed a level behind it. Landing on the rail also primes
+    // the Boost arm, so the gesture is "reach the rail, keep pushing" rather
+    // than requiring a wasted detent to first pin against the stop.
     post_temp(nf);
+    if (nf <= s_arc_min && detents < 0) {
+        // Arrived at the rail under power — remember where the run started so
+        // a boost confirmed from here can put it back. Set BEFORE arming,
+        // since a re-arm inside the confirm window fires the boost from here.
+        if (s_run_from_f != nf) {
+            s_rail_from_f = s_run_from_f;
+            s_rail_from_us = esp_timer_get_time();
+        }
+        handle_rail_boost_arm(-1);
+    } else if (nf >= s_arc_max && detents > 0) {
+        if (s_run_from_f != nf) {
+            s_rail_from_f = s_run_from_f;
+            s_rail_from_us = esp_timer_get_time();
+        }
+        handle_rail_boost_arm(1);
+    } else {
+        clear_boost_arm();
+    }
     return true;
 }
 
@@ -1825,6 +2113,9 @@ static bool on_knob(int detents)
 // buttons and power disc, not a swipe on the dial itself (see
 // boost_btn_event_cb / power_long_press_cb) — up/down are simply unhandled
 // here now that the router forwards all four directions.
+//
+// One exception to the chain, below: while THIS side is on, the partner face
+// drops out of it and only the menu step survives.
 static bool on_gesture(lv_dir_t dir)
 {
     if (dir != LV_DIR_LEFT && dir != LV_DIR_RIGHT) return false;
@@ -1835,7 +2126,24 @@ static bool on_gesture(lv_dir_t dir)
 
     app_state_t st;
     dial_state_get(&st);
-    bool dual = dial_state_is_dual(&st);
+    // A side that is ON stops offering its partner. A side is on because
+    // someone is sleeping on it, and the expensive mistake in the dark is
+    // sliding one face over and adjusting the OTHER half of the bed — silent,
+    // plausible, and it lands on a person who is asleep and didn't ask. An off
+    // side has no such cost, so it keeps the full chain: that is the state you
+    // are in when setting the bed up, and moving between sides is the point.
+    //
+    // Implemented by collapsing the chain rather than special-casing each
+    // swipe: while on, this face behaves exactly like the single-zone
+    // topper's, which is a shape the rest of this function already knows how
+    // to walk. Left reaches the menu (from either side, skipping the partner
+    // it would normally pass through — the alternative would strand ZONE_B
+    // with no route to settings at all), right has nowhere to go. Settings is
+    // always reachable either way; it is a destination you have to read to
+    // use, so arriving there by accident costs a swipe back, not a sleeping
+    // partner's night. Neither path touches ui_zone, so the menu's swipe-back
+    // still returns here.
+    bool dual = dial_state_is_dual(&st) && !st.zones[s_zone].on;
 
     if (dir == LV_DIR_LEFT) {
         if (dual && s_zone == ZONE_B) {

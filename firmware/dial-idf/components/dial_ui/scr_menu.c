@@ -54,26 +54,23 @@ static lv_obj_t *s_dot_update;
 // in user_data (bound at create(), same idiom scr_dial.c uses for the zone a
 // widget was built for), so adding another near-identical row never means
 // adding a near-identical callback.
-// The dial face the menu returns to: whichever side the user was last on
-// (ui_zone), which is also the only side that exists on a single-zone topper.
-static zone_idx_t back_zone(void)
-{
-    app_state_t st;
-    dial_state_get(&st);
-    return st.ui_zone;
-}
 
 static void row_event_cb(lv_event_t *e)
 {
     dial_haptics_play(HAPTIC_TICK);
     screen_id_t dest = (screen_id_t)(uintptr_t)lv_event_get_user_data(e);
-    // The Back row is the one destination that moves BACKWARD along the chain
-    // (to the dial the menu was swiped in from), so it gets the reverse
-    // transition and the zone arg the dial needs; every other row descends
-    // into a sub-screen. Keeping it a row (rather than floating chrome) means
-    // it never occludes the list and the knob can reach it like anything else.
+    // The Back row is the one destination that moves BACKWARD along the chain,
+    // so it gets the reverse transition; every other row descends into a
+    // sub-screen. Keeping it a row (rather than floating chrome) means it never
+    // occludes the list and the knob can reach it like anything else.
+    //
+    // It asks the router for "home" rather than naming the dial: the menu is
+    // also reachable while there is no dial to go back to — mid-link, mid-setup
+    // or before device state arrives — and hardcoding SCR_DIAL there rendered
+    // an empty face. SCR_DIAL is the marker for "this row means back", not the
+    // destination.
     if (dest == SCR_DIAL) {
-        ui_router_go(SCR_DIAL, (void *)(uintptr_t)back_zone(), LV_SCR_LOAD_ANIM_MOVE_RIGHT);
+        ui_router_go_home(LV_SCR_LOAD_ANIM_MOVE_RIGHT);
         return;
     }
     ui_router_go(dest, NULL, LV_SCR_LOAD_ANIM_MOVE_LEFT);
@@ -309,9 +306,11 @@ static bool on_knob(int detents)
 static bool on_gesture(lv_dir_t dir)
 {
     if (dir != LV_DIR_RIGHT) return false;
-    // Back to the side the user came in from — ui_zone is already whatever that
-    // swipe committed, so there's nothing to re-commit here.
-    ui_router_go(SCR_DIAL, (void *)(uintptr_t)back_zone(), LV_SCR_LOAD_ANIM_MOVE_RIGHT);
+    // Same "home" question the Back row asks — normally the side the user came
+    // in from (ui_zone is already whatever that swipe committed, so there's
+    // nothing to re-commit here), but the QR code or the setup portal when
+    // that's what's really behind the menu.
+    ui_router_go_home(LV_SCR_LOAD_ANIM_MOVE_RIGHT);
     return true;
 }
 

@@ -70,6 +70,14 @@ void ui_router_start(screen_id_t first, void *arg);
 // Navigate. anim: LV_SCR_LOAD_ANIM_NONE/FADE_ON/MOVE_LEFT/... LVGL task only.
 void ui_router_go(screen_id_t id, void *arg, lv_scr_load_anim_t anim);
 
+// Leave a screen the user deliberately opened (the menu face) for wherever the
+// app actually belongs right now, as decided by the nav policy: the dial, the
+// standby clock, the QR code mid-link, the portal mid-setup, or a status
+// screen. Screens must NOT hardcode SCR_DIAL for this — during setup, or
+// before device state has arrived, there is no dial to go back to and
+// navigating to one renders an empty face. LVGL task only.
+void ui_router_go_home(lv_scr_load_anim_t anim);
+
 // The currently shown screen.
 screen_id_t ui_router_current(void);
 

@@ -148,6 +148,29 @@ void ui_router_go(screen_id_t id, void *arg, lv_scr_load_anim_t anim)
     if (s_screens[id]->on_state) s_screens[id]->on_state(&st);
 }
 
+// Ask the nav policy where the app belongs right now, ignoring the fact that
+// the user is currently parked on a screen they opened on purpose, and go
+// there. Every sticky branch in the policy keys off ui_router_current() —
+// "they deliberately opened this, don't yank them off it" — so blanking the
+// current screen for the length of the call is exactly what turns that
+// question into "where do they belong?". The answer then comes from the
+// policy itself instead of from a second, drifting copy of its rules living
+// inside a screen: the menu used to hardcode SCR_DIAL here, which rendered an
+// empty face whenever there was no dial to go back to (mid-link, mid-setup,
+// or before the first device state lands).
+void ui_router_go_home(lv_scr_load_anim_t anim)
+{
+    if (!s_nav_policy) return;
+    app_state_t st;
+    dial_state_get(&st);
+    void *arg = s_current_arg;
+    screen_id_t save = s_current;
+    s_current = SCR_COUNT;
+    screen_id_t want = s_nav_policy(&st, &arg);
+    s_current = save;
+    ui_router_go(want, arg, anim);
+}
+
 // Runs in the LVGL task every 50ms: drain knob detents into the active screen
 // and re-render when the state generation moved. This is the ONLY place the
 // worker's commits reach LVGL, so the worker never needs the LVGL lock.
