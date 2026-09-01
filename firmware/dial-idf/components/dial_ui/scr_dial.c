@@ -144,23 +144,24 @@ static float seg_center(int i)
 }
 
 /*
- * The measured water temperature is reported in two places, and deliberately
- * NOT as a mark on the setpoint's own band.
+ * The measured water temperature is reported on every face by the WATER caption
+ * under the side name (which keeps its degree sign), and is also drawn onto the
+ * ring in a mode-specific way:
  *
  *   RELATIVE  an inner underline (seg_tick_render) on its own radius, hugging
  *             whichever of the 21 segments the bed is currently under.
- *   BOTH      the WATER caption under the side name, which keeps its degree
- *             sign on every face.
- *
- * An earlier absolute-mode design washed the arc itself between the setpoint
- * and the water (a "value step"): same band, same accent, one step down in
- * value. On hardware that reads as a second mark competing with the setpoint
- * fill for the same meaning — the owner sees one arc with two boundaries on it
- * and has to work out which one is the setting. It has been removed; absolute
- * mode's arc now carries the setpoint and nothing else, which is the same
- * separation the relative ring already had.
+ *   ABSOLUTE  a translucent "value step" wash on the arc band itself, from the
+ *             setpoint to the actual water (level_render below). Restored at the
+ *             owner's request after a spell removed.
  */
 static float      s_actual_f = -1.0f;   // measured water temp, °F; <0 = unknown
+
+// Absolute-face water-level wash (see the comment above). The relative face's
+// segment tick owns the water reading there, so this stays hidden in relative mode.
+#define LEVEL_OPA_UNDER  77     // ~30%: `bg` wash deepening the fill  (heating)
+#define LEVEL_OPA_OVER   82     // ~32%: accent ghost over the track   (cooling)
+static lv_obj_t  *s_level;              // the value-step overlay arc
+static lv_color_t s_level_accent;       // cached: the drag path has no state snapshot
 
 static lv_obj_t *s_name_lbl;
 static lv_obj_t *s_underline_solid, *s_underline_dash;
@@ -405,6 +406,51 @@ static void configure_arc_range(const app_state_t *st)
         s_arc_min = mn;
         s_arc_max = mx;
     }
+}
+
+/* ---- water level: value step over the arc (absolute face) -------------- */
+
+// Temperature -> degrees into the arc's own 0..270 sweep (rotation adds 135), on
+// the CURRENT absolute range, so the water overlay lands on the same scale as the
+// setpoint indicator. Absolute mode only; relative uses non-linear segment geometry.
+static uint16_t level_angle(float f)
+{
+    if (f < s_arc_min) f = s_arc_min;
+    if (f > s_arc_max) f = s_arc_max;
+    float d = 270.0f * (f - s_arc_min) / (float)(s_arc_max - s_arc_min);
+    return (uint16_t)lroundf(d);
+}
+
+// Wash the arc between the setpoint and the actual water temperature. Absolute
+// mode ONLY: in relative mode the segment ring's tick (seg_tick_render) owns the
+// water reading, so keep the overlay hidden there and leave it be.
+static void level_render(int target_f)
+{
+    if (!s_level) return;
+    if (s_rel) {                                // relative face: the ring's tick owns water
+        lv_obj_add_flag(s_level, LV_OBJ_FLAG_HIDDEN);
+        return;
+    }
+    if (s_actual_f < 0) {                       // no measurement yet
+        lv_obj_add_flag(s_level, LV_OBJ_FLAG_HIDDEN);
+        return;
+    }
+
+    uint16_t a_water = level_angle(s_actual_f);
+    uint16_t a_set   = level_angle((float)target_f);
+    bool cooling = a_water > a_set;
+
+    uint16_t a0 = cooling ? a_set : 0;
+    uint16_t a1 = a_water;
+    if (a1 <= a0 + 1) {                         // at target: no step to draw
+        lv_obj_add_flag(s_level, LV_OBJ_FLAG_HIDDEN);
+        return;
+    }
+
+    lv_obj_set_style_arc_color(s_level, cooling ? s_level_accent : PAL()->bg, LV_PART_INDICATOR);
+    lv_obj_set_style_arc_opa(s_level, cooling ? LEVEL_OPA_OVER : LEVEL_OPA_UNDER, LV_PART_INDICATOR);
+    lv_arc_set_angles(s_level, a0, a1);
+    lv_obj_clear_flag(s_level, LV_OBJ_FLAG_HIDDEN);
 }
 
 /* ---- setpoint handle geometry ------------------------------------------ */
@@ -725,7 +771,9 @@ static void apply_palette_and_state(const app_state_t *st)
     // Water reading. Cached in °F so the drag and detent paths can re-draw the
     // relative face's underline without waiting for the next poll.
     s_actual_f = (z->actual_c >= 0) ? (float)dial_c_to_f(z->actual_c) : -1.0f;
-    segments_render(s_shown_f);
+    s_level_accent = arc_accent;   // cache for the drag/detent paths' level_render
+    segments_render(s_shown_f);    // relative-face water (the segment tick)
+    level_render(s_shown_f);       // absolute-face water wash (no-op in relative mode)
 
     // Side name + identity underline.
     lv_obj_set_style_text_color(s_name_lbl, pal->ink_secondary, 0);
@@ -1253,6 +1301,7 @@ static void handle_event_cb(lv_event_t *e)
         lv_arc_set_value(s_arc, f);
         render_numeral(f);
         segments_render(f);
+        level_render(f);
         position_handle(f);
         dial_state_stamp_input();
         return;
@@ -1267,6 +1316,7 @@ static void handle_event_cb(lv_event_t *e)
         lv_arc_set_value(s_arc, f);
         render_numeral(f);
         segments_render(f);
+        level_render(f);
         position_handle(f);
     }
     if (f == s_press_f) return;   // a tap that didn't move commits nothing
@@ -1448,6 +1498,25 @@ static void create(lv_obj_t *scr, void *arg)
     // to the screen so they can be swipes/long-presses; the discrete handle
     // below is the only thing that sets temperature.
     lv_obj_clear_flag(s_arc, LV_OBJ_FLAG_CLICKABLE);
+
+    // Absolute-face water wash — a translucent step on the arc band from the
+    // setpoint to the actual water. Created right after the arc so it draws just
+    // over the track and below the segments / handle / numeral (the
+    // move_foreground chain below keeps those on top). Its own track is off; only
+    // the INDICATOR draws. Display-only, hidden until a measurement lands (and it
+    // stays hidden in relative mode, where the ring's tick shows water instead).
+    s_level = lv_arc_create(scr);
+    lv_obj_set_size(s_level, 2 * ARC_R, 2 * ARC_R);
+    lv_obj_center(s_level);
+    lv_arc_set_rotation(s_level, 135);
+    lv_arc_set_bg_angles(s_level, 0, 270);
+    lv_arc_set_angles(s_level, 0, 0);
+    lv_obj_set_style_arc_opa(s_level, LV_OPA_TRANSP, LV_PART_MAIN);   // no second track
+    lv_obj_set_style_arc_width(s_level, 16, LV_PART_INDICATOR);
+    lv_obj_set_style_arc_rounded(s_level, true, LV_PART_INDICATOR);
+    lv_obj_remove_style(s_level, NULL, LV_PART_KNOB);
+    lv_obj_clear_flag(s_level, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(s_level, LV_OBJ_FLAG_HIDDEN);   // until the first measurement
 
     // Level ring — 21 segments over the arc's own sweep, one per level, drawn
     // only in relative mode (segments_render). Created here, between the arc
@@ -1876,6 +1945,7 @@ static void destroy(void)
 
     for (int i = 0; i < SEG_N; i++) s_seg[i] = NULL;
     s_seg_tick = NULL;
+    s_level = NULL;
     s_seg_lit_opa = LV_OPA_COVER;
     s_seg_zone_on = true;
     s_boost_settle_us = 0;
@@ -2074,6 +2144,7 @@ static bool on_knob(int detents)
     s_shown_f = nf;
     render_numeral(nf);
     segments_render(nf);
+    level_render(nf);
     position_handle(nf);
     anim_zoom_bump(s_temp_lbl);
     // A detent that MOVES the setpoint always commits it, including the one
