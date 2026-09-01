@@ -12,6 +12,52 @@ section in the same commit that bumps `PROJECT_VER`.
 Releases marked **(beta)** were prereleases, visible only to dials with
 "Beta builds" turned on.
 
+## 1.5.0-beta.1 — 2026-08-31 (beta)
+
+Community-driven: most of this release is the work of Phil Topness
+(@topness-msft), landed with thanks.
+
+### Added
+
+- **Rail-push Boost.** From the dial face, keep turning the knob past the cold
+  (or hot) end of the arc and hold for a moment: the dial arms, buzzes, and
+  starts a Boost — no need to open the Boost screen first. Turn firmly the
+  other way to cancel one that's running. The Boost length you last chose is
+  remembered.
+- **A segmented level ring on the relative scale.** The relative (−10…+10) face
+  now reads as 21 discrete steps along a cool-to-warm colour ramp instead of one
+  continuous arc, with the current level lit and a thin mark showing where the
+  bed's actual water temperature sits.
+- **Tap the number to switch scales.** Tapping the big temperature numeral
+  toggles between the absolute (°F) and relative (level) scales — the same
+  choice under Settings → Scale.
+
+### Changed
+
+- **A quieter "off" face.** When a side is switched off, the dial no longer
+  shows live controls: the arc and numeral fade back and the power button
+  breathes, so an off side reads as off at a glance — and the knob won't quietly
+  change a setting on a side that isn't running.
+
+### Fixed
+
+- **Linking no longer dead-ends.** Right after you approved the dial on your
+  phone, it could get stuck showing the QR code again — the secure token
+  exchange couldn't get a network socket and failed silently. The dial now frees
+  the setup server's sockets first and completes the link reliably. (This is
+  behind some "have to keep signing in" reports, where the sign-in itself
+  wouldn't take.)
+- **The setup screen is no longer a trap.** From the link screen you can swipe
+  to the menu and open Wi-Fi settings, and "Change network", "Re-link", and
+  "Factory reset" take effect immediately during setup instead of waiting out
+  the QR window. If a link fails, the dial says why instead of just showing the
+  code again.
+- **No more surprise restart while re-linking.** A rare crash that rebooted the
+  dial while it sat on the link screen is fixed.
+- **Tonight's schedule loads at boot**, not about half an hour later.
+
+The absolute face keeps its water-level wash.
+
 ## 1.4.2 — 2026-08-05
 
 One beta cut, verified on hardware, promoted to stable:
