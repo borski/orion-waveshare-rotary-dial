@@ -108,6 +108,12 @@ void dial_state_set_rel_mode(bool rel_mode)
     s_state.generation++;
 }
 
+// Boost-duration pref (NVS-backed on hardware, default 15 min); the sim keeps it
+// in memory so the boost screen and rail-push gesture read a stable value.
+static uint8_t s_boost_minutes = 15;
+uint8_t dial_state_get_boost_minutes(void) { return s_boost_minutes; }
+void dial_state_set_boost_minutes(uint8_t minutes) { s_boost_minutes = minutes; s_state.generation++; }
+
 // Optimistic relief write: the simulator has no worker to reconcile against,
 // so this just mutates the store the same way the firmware's does.
 void dial_state_set_relief_optimistic(int zone, bool active, bool heat, int64_t end_ms)

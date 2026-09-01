@@ -12,6 +12,7 @@
 #include <stdint.h>
 #include <string.h>
 #include <stdio.h>
+#include <time.h>
 
 #include "dial_haptics.h"
 #include "dial_power.h"
@@ -20,6 +21,16 @@
 #include "esp_wifi.h"
 #include "esp_app_desc.h"
 
+/* ---- esp_timer --------------------------------------------------------- */
+// Monotonic microseconds, matching esp_timer_get_time()'s contract. scr_dial.c
+// uses it for the boost / rail-push gesture timing.
+int64_t esp_timer_get_time(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (int64_t)ts.tv_sec * 1000000 + (int64_t)ts.tv_nsec / 1000;
+}
+
 /* ---- dial_haptics ------------------------------------------------------ */
 
 void dial_haptics_play(haptic_effect_t fx) { (void)fx; }
@@ -27,6 +38,8 @@ void dial_haptics_set_level(haptic_level_t level) { (void)level; }
 void dial_haptics_set_night(bool night) { (void)night; }
 void dial_haptics_mute(bool muted) { (void)muted; }
 void dial_haptics_play_soft(haptic_effect_t fx) { (void)fx; }
+void dial_haptics_play_unmuted(haptic_effect_t fx) { (void)fx; }
+void dial_haptics_play_triple_confirm(void) {}
 void dial_haptics_init(void) {}
 
 /* ---- dial_power ---------------------------------------------------------
