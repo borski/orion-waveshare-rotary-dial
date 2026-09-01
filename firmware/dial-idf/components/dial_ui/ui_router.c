@@ -208,7 +208,15 @@ static void dispatch_tick(lv_timer_t *t)
         if (s_nav_policy) {
             void *arg = s_current_arg;
             screen_id_t want = s_nav_policy(&st, &arg);
-            ui_router_go(want, arg, LV_SCR_LOAD_ANIM_FADE_ON);  // no-op if unchanged
+            // Phase-driven (automatic) navigation loads SYNCHRONOUSLY. An animated
+            // load leaves LVGL's d->scr_to_load pending ~220ms; when the connect/
+            // OAuth loop flaps the phase, a later load finalizes that still-pending
+            // target and, if it was freed in the churn, LVGL dereferences a dangling
+            // screen (LoadProhibited in lv_obj_get_disp via scr_load_internal, seen
+            // on the authorize-restart path). A time-0 load completes within this
+            // same lv_timer_handler pass, so scr_to_load is never pending across
+            // ticks. Interactive screen changes keep their fade (user-paced).
+            ui_router_go(want, arg, LV_SCR_LOAD_ANIM_NONE);  // no-op if unchanged
             scr = s_screens[s_current];
         }
         if (scr && scr->on_state) scr->on_state(&st);
