@@ -139,16 +139,17 @@ itself:
 
    2.4 GHz only — this hardware doesn't support 5 GHz networks.
 3. **Link your Orion account.** Once Wi-Fi is up, the dial shows a QR code —
-   scan it **with your phone on the same Wi-Fi network** as the dial. That
-   opens Orion's own consent page in your phone's browser; approve it there.
-   The dial is watching for the callback on your LAN and picks up the link
-   automatically — nothing to type back in on the dial itself. If your phone
-   is on a different network (e.g. still on cellular), the dial can't receive
-   that callback and the QR will effectively hang; switch your phone to the
-   same Wi-Fi and rescan. The network name printed under the code is a link:
-   tap it to open Wi-Fi settings if it's the *dial* that's on the wrong
-   network. Swiping left opens the menu from here too, so Settings and
-   software update stay reachable before the dial is linked.
+   scan it with your phone's camera. That opens Orion's own consent page in
+   your phone's browser; approve it there. Your phone can be on any network —
+   the dial's Wi-Fi, a different one, or cellular — because the approval comes
+   back through a hosted relay the dial polls, not a callback *into* the dial,
+   so there's no local-reachability requirement. The dial picks up the link
+   automatically — nothing to type back in on the dial itself. (How and why the
+   relay works is written up in [../../docs/linking-relay.md](../../docs/linking-relay.md).)
+   The network name printed under the code is a link: tap it to open Wi-Fi
+   settings if it's the *dial* that's on the wrong network. Swiping left opens
+   the menu from here too, so Settings and software update stay reachable before
+   the dial is linked.
 4. **Pick a side.** On a dual-zone topper, the dial asks "Which side of the
    bed?" once, right after linking — tap the half of the screen for your
    side. (Skipped entirely on a single-zone topper — there's only one side to
@@ -251,13 +252,14 @@ itself:
   **2.4 GHz only** — it cannot join 5 GHz-only networks. If your router
   broadcasts both bands under one SSID, make sure the 2.4 GHz radio is
   actually enabled.
-- **The Orion QR code doesn't seem to do anything after I scan it.** Your
-  phone almost certainly isn't on the same Wi-Fi network as the dial — the
-  dial listens for the OAuth callback on its own LAN, so a phone on cellular
-  data or a different network can approve the consent page but the dial will
-  never see it land. Put your phone on the same network as the dial and scan
-  again. The network name under the code says which one that is, and tapping
-  it opens Wi-Fi settings if the dial is the one that needs moving.
+- **The Orion QR code doesn't seem to do anything after I scan it.** The
+  approval comes back through a hosted relay the dial polls, so your phone's
+  network doesn't matter — but the *dial* still needs working internet to reach
+  both the relay and Orion. If it hangs, the dial is most likely on a flaky or
+  captive Wi-Fi: confirm it's actually online (the network name under the code
+  is a link to its Wi-Fi settings), and re-approve the consent page. A dropped
+  approval times out on its own and the QR refreshes — just scan and approve
+  again.
 - **The dial is stuck on "Connecting to Wi-Fi..." / "Orion unreachable."**
   These screens show the actual error and a retry countdown; the dial keeps
   retrying with backoff on its own. If it's stuck for more than a few

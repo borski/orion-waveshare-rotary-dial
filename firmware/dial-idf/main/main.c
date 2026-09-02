@@ -121,6 +121,11 @@ static const char *TAG = "app";
 // costs one queue peek each time round.
 #define CONSENT_WINDOW_MS 300000
 #define CONSENT_SLICE_MS     250
+// Poll the relay mailbox at most this often. Reboot servicing still runs every
+// CONSENT_SLICE_MS; decoupling the poll cadence from it keeps a fresh TLS
+// handshake off the wire ~4x/s (the 2026-07-28 router flood-protection incident)
+// while leaving the link screen's reboot controls responsive between polls.
+#define RELAY_POLL_INTERVAL_MS 1500
 
 // Discovery + anonymous client registration are the steps that must complete
 // before the Orion-link QR can even be built (the authorize URL needs the
@@ -1712,6 +1717,14 @@ static void handle_immediate_cmd(const app_cmd_t *cmd, const oauth_disc_t *disc,
 }
 
 /* ---- mDNS ---------------------------------------------------------------
+ * NOTE: since the code-relay migration, LINKING NO LONGER USES mDNS. The OAuth
+ * redirect_uri is now the hosted relay's /cb (a fleet-wide constant, reached
+ * outbound over the internet), not a per-device .local hostname — so none of
+ * the rationale below is load-bearing for onboarding any more. The bringup is
+ * kept only as harmless network presence; linking was its sole consumer, so a
+ * reviewer may delete mdns_bringup()/s_mdns_ok outright. The original reasoning
+ * is preserved below for that decision.
+ *
  * A stable orion-dial-xxxxxx.local hostname stands in for the DHCP IP in the
  * OAuth redirect_uri below. An IP-based redirect_uri silently invalidates the
  * registered OAuth client the moment the router hands out a new lease — the
@@ -1728,18 +1741,16 @@ static void handle_immediate_cmd(const app_cmd_t *cmd, const oauth_disc_t *disc,
  */
 static bool s_mdns_ok;
 
-// Registered once, right after Wi-Fi comes up and BEFORE the OAuth callback
-// server (dial_oauth_start_authorize, which the redirect_uri built below
-// points at) ever starts — see worker_task's call site. If registration
-// itself fails (some networks block/filter multicast), s_mdns_ok stays false
-// and every redirect_uri build below falls back to the old IP-based form, so
-// a network like that can still onboard, just without this fix.
+// Registered once, right after Wi-Fi comes up. Formerly this had to precede the
+// OAuth callback server so the redirect_uri could point at the mDNS hostname;
+// the relay migration removed both, so s_mdns_ok now has no reader and this is
+// vestigial network presence (see the block note above). A registration
+// failure (some networks block/filter multicast) is no longer load-bearing.
 static void mdns_bringup(void)
 {
     esp_err_t err = mdns_init();
     if (err != ESP_OK) {
-        ESP_LOGW(TAG, "mdns_init failed (%s) -- OAuth redirect_uri will fall back to the DHCP IP",
-                 esp_err_to_name(err));
+        ESP_LOGW(TAG, "mdns_init failed (%s)", esp_err_to_name(err));
         return;
     }
     mdns_hostname_set(dial_net_hostname());
@@ -1792,34 +1803,35 @@ static void worker_task(void *arg)
     // debugging session -- see the QR screen's own comment).
     dial_state_commit(mut_sta_ssid, (void *)dial_net_sta_ssid());
     dial_time_start();
-    mdns_bringup();   // BEFORE the OAuth callback server (below) ever starts
+    mdns_bringup();   // vestigial since the relay migration — see its note above
 
     // ---- OAuth + MCP with retry/backoff on every step ----
     for (;;) {
         dial_state_set_phase(PH_OAUTH_DISCOVER, NULL);
 
-        char ip[16], redirect_uri[48];
-        if (!dial_net_ip(ip, sizeof(ip))) {
-            vTaskDelay(pdMS_TO_TICKS(1000));
-            continue;
-        }
-        // An ALREADY-LINKED device keeps whatever redirect_uri its client was
-        // registered with, even the old DHCP-IP form. Registration is
-        // per-redirect_uri, so adopting the new hostname here would mint a
-        // fresh client_id and strand the stored refresh token ("Client ID
-        // mismatch"), forcing every updating user through the QR flow — a
-        // fleet-wide re-link as the price of a fix they didn't ask for.
-        // Only an unlinked device (fresh, factory-reset, or already
-        // re-linking) adopts the mDNS hostname. Everyone else migrates for
-        // free the next time they re-link for their own reasons.
-        if (!dial_oauth_cached_redirect(redirect_uri, sizeof(redirect_uri))) {
-            // Stable hostname when mDNS came up; the DHCP IP (documented
-            // fallback) only when it didn't — see mdns_bringup()'s comment.
-            if (s_mdns_ok)
-                snprintf(redirect_uri, sizeof(redirect_uri), "http://%s.local/callback", dial_net_hostname());
-            else
-                snprintf(redirect_uri, sizeof(redirect_uri), "http://%s/callback", ip);
-        }
+        // The redirect_uri is now the hosted relay's /cb — one stable constant
+        // for the WHOLE FLEET (dial_link_config.h). The phone reaches it over
+        // the internet (outbound-only), so linking no longer depends on the
+        // phone being able to reach the dial INBOUND on the LAN — the failure
+        // that stranded users on cellular / guest / client-isolated / weak
+        // Wi-Fi. No more mDNS-hostname or DHCP-IP redirect construction.
+        const char *redirect_uri = ORION_DIAL_RELAY_REDIRECT;
+
+        // Backward-compat: an ALREADY-LINKED device keeps whatever redirect_uri
+        // its client was registered with (even the old on-LAN .local/IP form).
+        // DCR is per-redirect_uri, so presenting a different URI here would mint
+        // a fresh client_id and strand the stored refresh token ("Client ID
+        // mismatch"), forcing every updating user back through the QR flow. Only
+        // an unlinked device (fresh, factory-reset, or already re-linking)
+        // adopts the relay redirect; everyone else keeps refreshing untouched
+        // and migrates to it the next time they re-link for their own reasons.
+        // The migration hinges on dial_oauth_forget() clearing the cached
+        // client_id+redirect (it does): after a Re-link or a dead-token
+        // auto-relink, cached_redirect() returns false here, so the relay
+        // constant above stands and a fresh client is registered against it.
+        char cached_uri[160];
+        if (dial_oauth_cached_redirect(cached_uri, sizeof(cached_uri)))
+            redirect_uri = cached_uri;
 
         if (!dial_oauth_discover(&disc) ||
             !dial_oauth_ensure_client(&disc, redirect_uri, client_id, sizeof(client_id))) {
@@ -1853,30 +1865,52 @@ static void worker_task(void *arg)
             }
             dial_state_commit(mut_oauth_url, url);
             dial_state_set_phase(PH_OAUTH_WAIT_CONSENT, NULL);
-            // Wait out the consent window in slices, so a Change network /
-            // Re-link / Factory reset tapped from the link screen reboots now
-            // rather than in up to five minutes' time (wait_servicing_reboots).
-            // The exchange itself still runs in one go, once the code is in.
-            for (int waited = 0; waited < CONSENT_WINDOW_MS && !dial_oauth_have_code();
-                 waited += CONSENT_SLICE_MS)
+            // Wait out the consent window, servicing reboots every slice so a
+            // Change network / Re-link / Factory reset tapped from the link
+            // screen reboots now rather than in up to five minutes' time
+            // (wait_servicing_reboots). The exchange itself still runs in one go,
+            // once the code is in. Between slices the dial polls the relay
+            // mailbox (outbound HTTPS GET) for the code the phone's redirect
+            // deposited there — this replaced the old inbound LAN callback —
+            // throttled to RELAY_POLL_INTERVAL_MS. The window is measured off the
+            // monotonic clock, not a slice counter, so a blocking poll can't
+            // stretch the nominal CONSENT_WINDOW_MS to hours on a slow relay.
+            int64_t consent_start = esp_timer_get_time();
+            int64_t next_poll_us = 0;   // poll immediately on the first pass
+            while (!dial_oauth_have_code() &&
+                   (esp_timer_get_time() - consent_start) < (int64_t)CONSENT_WINDOW_MS * 1000) {
+                if (esp_timer_get_time() >= next_poll_us) {
+                    dial_oauth_poll_relay_once(&disc);
+                    next_poll_us = esp_timer_get_time() + (int64_t)RELAY_POLL_INTERVAL_MS * 1000;
+                    if (dial_oauth_have_code()) break;
+                }
                 wait_servicing_reboots(CONSENT_SLICE_MS);
+            }
             bool got = dial_oauth_have_code();
-            // Shut the callback server down BEFORE the exchange, not after.
-            // It has done its whole job the moment the code lands, and it is
-            // not free while it lingers: httpd holds up to 7 sockets, the
-            // phone's browser leaves several of them open and keep-alive, and
-            // LWIP only has ten to give. The HTTPS POST that follows then
-            // could not get one — no DNS, no connect, "HTTP -1" with no status
-            // and no body, promptly, right after a consent that worked
-            // (owner-reported). Nothing below needs the server; the code and
-            // the PKCE verifier are already in hand.
+            // End the authorize session before the exchange. There is no
+            // callback server to reclaim sockets from any more (the relay poll
+            // replaced it — killing the old port-80 httpd/socket-exhaustion
+            // failure outright); the call just retires the spent mailbox key.
+            // The captured code and PKCE verifier are already in hand for the
+            // finish below.
             dial_oauth_stop_authorize();
             bool ok = got && dial_oauth_finish_authorize(&disc, client_id, redirect_uri, 0);
             if (!ok) {
                 if (!got) {
-                    // Nobody scanned in time. A fresh code is exactly the right
-                    // answer, and the QR screen is already saying what to do.
-                    ESP_LOGW(TAG, "consent window elapsed — new QR");
+                    // A relay TLS/cert failure (e.g. a mis-set relay CA or an
+                    // expired edge cert) would otherwise loop here forever behind
+                    // a silent QR — the exact infinite-loader this whole change
+                    // removes. Surface it honestly, the way the discovery leg
+                    // does. Otherwise nobody scanned in time, and a fresh code is
+                    // exactly the right answer — the QR screen already says so.
+                    if (dial_oauth_last_err_cert()) {
+                        ESP_LOGE(TAG, "relay poll TLS/cert failure — surfacing");
+                        dial_state_set_phase(PH_DEGRADED, DIAL_CERT_ERR_MSG);
+                        backoff_wait(backoff_s);
+                        backoff_s = (backoff_s * 2 > BACKOFF_MAX_S) ? BACKOFF_MAX_S : backoff_s * 2;
+                    } else {
+                        ESP_LOGW(TAG, "consent window elapsed — new QR");
+                    }
                     continue;
                 }
                 // The phone consented, the code came back, and the exchange

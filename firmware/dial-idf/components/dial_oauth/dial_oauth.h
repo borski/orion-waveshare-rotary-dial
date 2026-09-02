@@ -2,6 +2,10 @@
 #include <stdbool.h>
 #include <stddef.h>
 
+// Relay origin + the fleet-wide redirect_uri (ORION_DIAL_RELAY_REDIRECT), used
+// by the authorize/poll path below and by main's worker_task.
+#include "dial_link_config.h"
+
 /*
  * OAuth 2.1 client for the Orion MCP server (https://mcp.orionsleep.com/),
  * ported from the project's earlier TypeScript prototype
@@ -53,10 +57,16 @@ bool dial_oauth_access_token(char *out, size_t sz);
 // Refresh the access token using the stored refresh_token. Returns true on success.
 bool dial_oauth_refresh(const oauth_disc_t *disc, const char *client_id);
 
-// Settings "Re-link Orion": erase only the stored access/refresh tokens,
-// keeping the registered client_id (DCR is one-time; re-linking shouldn't
-// have to re-register). The next boot finds no valid/refreshable token and
-// falls back to interactive consent.
+// Full unlink (Settings "Re-link Orion", and the auto-relink after a
+// permanently-rejected refresh token): erase the access/refresh tokens AND the
+// registered client_id + its cached redirect_uri. Clearing the client is what
+// lets the next boot re-register a fresh DCR client against the current relay
+// redirect (dial_link_config.h) — a device that first linked on pre-relay
+// firmware has the old on-LAN .local redirect cached, and reusing it would send
+// the re-link QR's callback to a server that no longer exists. The next boot
+// finds no token to refresh and falls back to interactive consent, re-consenting
+// once. A healthy device that keeps refreshing never calls this, so it is never
+// forced to re-register.
 void dial_oauth_forget(void);
 
 // Drop only the access token (keep the refresh token + client_id), so the next
@@ -64,19 +74,46 @@ void dial_oauth_forget(void);
 // already rejected. See the note in dial_oauth_have_valid_access.
 void dial_oauth_forget_access(void);
 
-// Interactive authorization (on-device consent):
+// Interactive authorization (on-device consent), via the hosted PKCE
+// code-relay (dial_link_config.h). The redirect_uri is the relay's /cb: the
+// phone's approval is redirected there (OUTBOUND, over the internet), and the
+// dial COLLECTS the resulting code by polling the relay — it runs no inbound
+// HTTP server any more, which is what made linking fail on guest/isolated/weak
+// Wi-Fi where the phone could never reach the dial.
 //  1) start: generate PKCE + state, build the authorize URL (for the on-screen
-//     QR), and start the LAN callback HTTP server. Fills url_out.
+//     QR), and record the PKCE verifier + state for the poll/exchange below.
+//     Fills url_out. Does NOT open any network listener.
 bool dial_oauth_start_authorize(const oauth_disc_t *disc, const char *client_id,
                                 const char *redirect_uri, char *url_out, size_t url_sz);
-//  2) finish: block until the phone approves and the callback delivers a code,
-//     then exchange it for tokens (stored in NVS). Returns true on success.
+
+// Result of one relay poll (dial_oauth_poll_relay_once).
+typedef enum {
+    DIAL_RELAY_GOT = 0,   // the code was captured; dial_oauth_have_code() is now true
+    DIAL_RELAY_PENDING,   // relay reached, no code deposited yet — keep polling
+    DIAL_RELAY_ERROR,     // transient transport/HTTP/parse error — keep polling
+} dial_relay_poll_t;
+
+//  1b) poll: ONE outbound HTTPS GET to <RELAY>/poll?state=…; on {"code":"…"}
+//     it captures the code (into the same buffer the old LAN callback filled,
+//     with the same strict bounds) and raises dial_oauth_have_code(). Call it
+//     once per consent slice. `disc` is accepted for call-site symmetry with
+//     start/finish; the relay host is a fixed compile-time constant, not from
+//     discovery.
+dial_relay_poll_t dial_oauth_poll_relay_once(const oauth_disc_t *disc);
+
+//  2) finish: exchange the captured code + PKCE verifier + redirect_uri for
+//     tokens (stored in NVS). Returns true on success. timeout_ms is a short
+//     grace window for a code already in hand; the poll above is what fetches
+//     it, so callers pass 0 once dial_oauth_have_code() is true.
 bool dial_oauth_finish_authorize(const oauth_disc_t *disc, const char *client_id,
                                  const char *redirect_uri, int timeout_ms);
-//  true once the browser has delivered the code, so the wait above can be split
-//  into slices the caller does other work between.
+//  true once the relay poll has delivered the code, so the consent wait can be
+//  split into slices the caller does other work (servicing reboots) between.
 bool dial_oauth_have_code(void);
-//  cleanup the callback server (call after finish, success or not).
+//  end the authorize session: clears the transient state (the spent mailbox
+//  key). No callback server to stop any more — kept as a stable call site, and
+//  safe to call right before finish (it leaves the captured code + verifier
+//  intact).
 void dial_oauth_stop_authorize(void);
 
 // The most recent token-endpoint error (HTTP status + body snippet), for display.

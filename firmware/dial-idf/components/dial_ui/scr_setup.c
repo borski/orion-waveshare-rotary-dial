@@ -118,26 +118,23 @@ const ui_screen_t scr_wifi_portal = {
 #define OAUTH_CARD_SIZE  (OAUTH_QR_SIZE + 2 * OAUTH_CARD_PAD)
 
 /*
- * Linking's last step is an OAuth loopback: the phone approves on Orion's
- * site, and Orion's browser redirect lands back on the DIAL's own LAN
- * address (http://orion-dial-xxxxxx.local/callback). That redirect can only
- * ever arrive over the SAME network the dial is on — cellular data, a guest
- * network, or client-isolated Wi-Fi all silently strand it, leaving the
- * phone spinning forever with nothing on the dial explaining why (a real
- * field incident: an owner lost a long stretch to exactly this). Orion's
- * auth server doesn't support the device-authorization grant, so this LAN
- * dependency can't be engineered away — the fix is naming it, twice, and then
- * giving the user something to do about it:
- *   1) a persistent one-line hint under the QR, always visible;
- *   2) if nothing has come back for a while, a specific, dismissible
- *      explainer restating it — for the very likely case that a user has
- *      simply not scanned yet, this must have a clear close state and must
- *      never permanently sit over the code.
- *   3) that hint line is itself a link into Wi-Fi settings, because naming
- *      the mismatch and then offering no way to fix it is only half an
- *      answer — see oauth_wifi_cb. Reaching those settings at all also took
- *      lifting nav_policy's outright pin on this phase (main.c), which is
- *      what made this screen modal in the first place.
+ * Linking's last step USED to be an OAuth loopback onto the dial's own LAN
+ * address (http://orion-dial-xxxxxx.local/callback), which only worked when the
+ * phone and the dial shared a network — cellular data, a guest network, or
+ * client-isolated Wi-Fi silently stranded it, leaving the phone spinning with
+ * nothing on the dial explaining why (a real field incident: an owner lost a
+ * long stretch to exactly this). Linking now goes through the hosted PKCE relay
+ * (dial_link_config.h): Orion redirects the phone to the relay over the
+ * internet and the dial polls it for the code, so linking is OUTBOUND-ONLY and
+ * the phone can be on ANY network. That removes the same-network requirement
+ * this screen once had to name and route around, so what's left is simple:
+ *   1) a persistent one-line caption under the QR ("approve on your phone");
+ *   2) if nothing has come back for a while, a dismissible explainer nudging a
+ *      user who simply hasn't scanned yet — with a clear close state, and never
+ *      permanently sitting over the code.
+ * (The old third part — the caption doubling as a Wi-Fi-settings shortcut to
+ * escape a network mismatch — is gone with the mismatch itself. Wi-Fi settings
+ * are still one swipe left in the menu.)
  */
 static lv_obj_t *s_oauth_card, *s_oauth_qr, *s_oauth_lbl, *s_oauth_hint_lbl;
 
@@ -208,23 +205,6 @@ static void oauth_wait_dismiss_cb(lv_event_t *e)
     oauth_arm_wait_timer(OAUTH_WAIT_REARM_MS);   // may reappear once, later — never right away
 }
 
-// The hint line is also the way OUT of a network mismatch. Everything on this
-// screen depends on the phone and the dial sharing a LAN, so the line that
-// names the network is exactly where a user realises they don't — and until
-// nav_policy stopped pinning this phase, realising it here led nowhere.
-// Tapping it opens Wi-Fi settings (status, IP, signal, change-network).
-//
-// Deliberately NOT mirrored onto the explainer sheet's copy, which names the
-// same network: the whole sheet is one big dismiss target ("tap anywhere"),
-// so a link inside it would be a tap that sometimes dismisses and sometimes
-// navigates depending on which word you hit.
-static void oauth_wifi_cb(lv_event_t *e)
-{
-    (void)e;
-    dial_haptics_play(HAPTIC_TICK);
-    ui_router_go(SCR_WIFI, NULL, LV_SCR_LOAD_ANIM_MOVE_LEFT);
-}
-
 // Swipe left to the menu — the same gesture that walks off the dial face, so
 // this screen stops being the one place in the UI where it does nothing. That
 // is where Re-link, Wi-Fi and software update live. RIGHT is left unconsumed
@@ -275,23 +255,14 @@ static void oauth_create(lv_obj_t *scr, void *arg)
     lv_obj_set_width(s_oauth_hint_lbl, 220);
     lv_label_set_long_mode(s_oauth_hint_lbl, LV_LABEL_LONG_WRAP);
     lv_obj_set_style_text_align(s_oauth_hint_lbl, LV_TEXT_ALIGN_CENTER, 0);
-    lv_label_set_text(s_oauth_hint_lbl, "Scan with a phone on this Wi-Fi network");
+    lv_label_set_text(s_oauth_hint_lbl, "Scan the code, then approve on your phone");
     lv_obj_align(s_oauth_hint_lbl, LV_ALIGN_CENTER, 0, 138);
-    // Tappable -> SCR_WIFI. Underline rather than a brighter ink, so the line
-    // stays subordinate to the QR exactly as described above — the code is
-    // still the thing to look at. ext_click_area mirrors the value the dial's
-    // own tappable notice label uses; it reaches ~44px tall on a ~200px-wide
-    // line, short of this project's >=72px floor for the same reason that one
-    // documents (there is no room to grow here without crowding either the
-    // card above or the panel's rim below), and the same reason a button was
-    // not used instead. The 14px it does add upward runs under the card, which
-    // is explicitly non-clickable, so nothing is stolen from it; where the
-    // explainer sheet overlaps, the sheet is above this label in z-order and
-    // keeps its own tap-anywhere dismiss.
-    lv_obj_add_flag(s_oauth_hint_lbl, LV_OBJ_FLAG_CLICKABLE);
-    lv_obj_set_style_text_decor(s_oauth_hint_lbl, LV_TEXT_DECOR_UNDERLINE, 0);
-    lv_obj_set_ext_click_area(s_oauth_hint_lbl, 14);
-    lv_obj_add_event_cb(s_oauth_hint_lbl, oauth_wifi_cb, LV_EVENT_CLICKED, NULL);
+    // Plain, subordinate caption. It used to be a tappable shortcut into Wi-Fi
+    // settings (underlined), back when linking needed the phone and the dial on
+    // the same LAN and this line was where a user realised they weren't. The
+    // relay makes linking outbound-only (any network, even cellular), so there
+    // is no same-network mismatch to escape from here — the line is just text,
+    // and Wi-Fi settings are still one swipe left in the menu.
 
     // Part 2: the dismissible explainer, hidden until its timer fires.
     s_wait_sheet = lv_obj_create(scr);
@@ -319,7 +290,7 @@ static void oauth_create(lv_obj_t *scr, void *arg)
     lv_obj_set_width(s_wait_body_lbl, 200);
     lv_label_set_long_mode(s_wait_body_lbl, LV_LABEL_LONG_WRAP);
     lv_obj_set_style_text_align(s_wait_body_lbl, LV_TEXT_ALIGN_CENTER, 0);
-    lv_label_set_text(s_wait_body_lbl, "Check your phone is on this\nWi-Fi network, not cellular.\nThen approve again.");
+    lv_label_set_text(s_wait_body_lbl, "Scan the code and approve\non your phone. A new code\nappears if this one expires.");
     lv_obj_align(s_wait_body_lbl, LV_ALIGN_TOP_MID, 0, 62);
 
     // Explicit close affordance, sized to this project's >=72px touch rule.
@@ -367,26 +338,12 @@ static void oauth_on_state(const app_state_t *st)
     if (st->oauth_url[0])
         lv_qrcode_update(s_oauth_qr, st->oauth_url, strlen(st->oauth_url));
 
-    // Part 1's copy, and the explainer's — both name the real network when
-    // it's known, and fall back to generic wording rather than show nothing.
-    if (st->sta_ssid[0]) {
-        char buf[64];
-        snprintf(buf, sizeof(buf), "Scan with a phone on \"%s\"", st->sta_ssid);
-        lv_label_set_text(s_oauth_hint_lbl, buf);
-    } else {
-        lv_label_set_text(s_oauth_hint_lbl, "Scan with a phone on this Wi-Fi network");
-    }
-
-    char wait_body[160];
-    if (st->sta_ssid[0]) {
-        snprintf(wait_body, sizeof(wait_body),
-                 "Check your phone is on\n\"%s\"\nWi-Fi, not cellular. Then approve again.",
-                 st->sta_ssid);
-    } else {
-        snprintf(wait_body, sizeof(wait_body),
-                 "Check your phone is on this\nWi-Fi network, not cellular.\nThen approve again.");
-    }
-    lv_label_set_text(s_wait_body_lbl, wait_body);
+    // Linking is outbound-only now (via the relay), so the phone can be on ANY
+    // network — cellular, guest, a different Wi-Fi — and this copy no longer
+    // names or depends on the dial's SSID. Constant text; nothing here varies.
+    lv_label_set_text(s_oauth_hint_lbl, "Scan the code, then approve on your phone");
+    lv_label_set_text(s_wait_body_lbl,
+                      "Scan the code and approve\non your phone. A new code\nappears if this one expires.");
 
     // Fresh QR detection. This screen is NOT rebuilt when main.c's 5-minute
     // consent window elapses and restarts the authorize flow with a new URL

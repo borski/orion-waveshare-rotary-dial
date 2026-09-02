@@ -289,9 +289,9 @@ static void scenario_oauth_qr(void)
     st->phase = PH_OAUTH_WAIT_CONSENT;
     snprintf(st->oauth_url, sizeof(st->oauth_url),
              "https://github.com/chris023/orion-waveshare-rotary-dial");
-    // Plausible home-network name: exercises scr_setup.c's "Scan with a
-    // phone on ..." hint (Part 1 of the onboarding UX fix) instead of its
-    // generic no-SSID fallback.
+    // sta_ssid is still set (other setup screens use it), but scr_setup.c's QR
+    // hint no longer names the network: relay linking is outbound-only, so the
+    // phone can be on ANY network and the copy is network-agnostic now.
     snprintf(st->sta_ssid, sizeof(st->sta_ssid), "Kestrel-5G");
     ui_router_go(SCR_OAUTH_QR, NULL, LV_SCR_LOAD_ANIM_NONE);
     pump_ms(300);
@@ -300,8 +300,8 @@ static void scenario_oauth_qr(void)
 
 // Same setup as scenario_oauth_qr, but pumps past the 45s-quiet threshold so
 // scr_setup.c's dismissible "still waiting" explainer (Part 2) is on screen
-// -- the field-incident case where the phone can't reach the dial's LAN
-// callback and nobody scanned a fresh code in the meantime.
+// -- the case where a fresh code has been up a while and nobody has scanned it
+// yet (a nudge to scan and approve, no longer a same-network warning).
 static void scenario_oauth_waiting(void)
 {
     apply_baseline();

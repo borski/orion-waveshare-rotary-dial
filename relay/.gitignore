@@ -1,0 +1,4 @@
+# Relay-local ignores (the repo root .gitignore already covers node_modules/,
+# dist/, coverage/, *.log). These are Cloudflare-specific.
+.wrangler/
+.dev.vars

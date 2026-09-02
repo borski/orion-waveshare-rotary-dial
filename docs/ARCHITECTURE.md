@@ -26,8 +26,9 @@ router and the worker's own state machine:
 4. **`PH_OAUTH_DISCOVER`** — OAuth discovery + Dynamic Client Registration
    against Orion's MCP server.
 5. **`PH_OAUTH_WAIT_CONSENT`** — a QR code is on screen; waiting for the user
-   to approve the dial in their phone's browser and for the LAN redirect to
-   land.
+   to approve the dial in their phone's browser, then polling a hosted relay
+   (outbound HTTPS) for the returned authorization code. See
+   [linking-relay.md](linking-relay.md).
 6. **`PH_MCP_CONNECTING`** — token in hand; opening the MCP session and
    discovering the paired Orion device (`list_devices`).
 7. **`PH_READY`** — steady state: the command/poll loop below.

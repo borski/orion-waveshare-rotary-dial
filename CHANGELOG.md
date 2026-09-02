@@ -12,6 +12,35 @@ section in the same commit that bumps `PROJECT_VER`.
 Releases marked **(beta)** were prereleases, visible only to dials with
 "Beta builds" turned on.
 
+## 1.5.0-beta.2 — 2026-09-02 (beta)
+
+### Changed
+
+- **Linking works from any network now — even cellular.** Pairing used to need
+  your phone on the *same* Wi-Fi as the dial: the approval on Orion's site
+  redirected back to an address only reachable on your home network, so a phone
+  on cellular data, a guest network, or a network that keeps devices from
+  talking to each other would just spin forever with nothing on the dial saying
+  why (a real problem people hit — most recently on a dial that had roamed onto
+  a weak, far corner of the Wi-Fi). Approval now comes back over the internet
+  instead, so it completes wherever your phone is. The dial no longer runs a
+  little web server during setup at all — which also retires a class of pairing
+  failure where that server ran the dial out of network connections mid-link.
+- **Clearer wording on the scan screen.** The hint under the QR code and its
+  "still waiting" note no longer tell you to get on a particular Wi-Fi network,
+  because they no longer need to.
+
+### Fixed
+
+- **Re-link no longer gets stuck on some upgraded dials.** A dial that had
+  paired on an older version could, after this update, keep trying to finish a
+  re-link against the old same-network address and never complete. Re-linking
+  now cleanly switches such a dial over to the new flow.
+
+> This makes each sign-in reliable and network-independent. It does **not**
+> change how *often* Orion asks you to sign in — that interval is set by Orion's
+> service, not the dial.
+
 ## 1.5.0-beta.1 — 2026-08-31 (beta)
 
 Community-driven: most of this release is the work of Phil Topness

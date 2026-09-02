@@ -6,6 +6,7 @@
  */
 
 #include "dial_oauth.h"
+#include "dial_link_config.h"   // ORION_DIAL_RELAY_BASE — the code-relay origin
 
 #include <stdlib.h>
 #include <string.h>
@@ -15,7 +16,6 @@
 #include "esp_timer.h"
 #include "esp_random.h"
 #include "esp_http_client.h"
-#include "esp_http_server.h"
 #include "esp_system.h"   // esp_get_free_heap_size, in the transport error detail
 
 // Trust anchors for Orion's server (GTS Root R4 + GlobalSign Root CA), embedded
@@ -113,7 +113,8 @@ static void http_reset(void)
 // content_type NULL for GET. Returns HTTP status (or -1); *body_out is a
 // malloc'd, NUL-terminated body (caller frees).
 static int http_do(const char *url, esp_http_client_method_t method,
-                   const char *content_type, const char *body_in, char **body_out)
+                   const char *content_type, const char *body_in, char **body_out,
+                   int timeout_ms)
 {
     resp_t r = { 0 };
     s_resp = &r;
@@ -128,7 +129,7 @@ static int http_do(const char *url, esp_http_client_method_t method,
                 .url = url,
                 .event_handler = on_http,
                 .cert_pem = orion_root_ca_pem_start,   // verify against Orion's embedded roots
-                .timeout_ms = 15000,
+                .timeout_ms = timeout_ms,
                 .keep_alive_enable = true,
             };
             s_http = esp_http_client_init(&cfg);
@@ -136,6 +137,11 @@ static int http_do(const char *url, esp_http_client_method_t method,
         } else {
             esp_http_client_set_url(s_http, url);
         }
+        // The handle is kept alive and reused, so its init-time timeout would
+        // otherwise stick at whatever the FIRST caller set. Re-apply per call so
+        // the relay poll's short timeout (below) actually takes effect and can't
+        // let one blocking poll stall the consent loop's reboot servicing.
+        esp_http_client_set_timeout_ms(s_http, timeout_ms);
         esp_http_client_set_method(s_http, method);
         esp_http_client_set_header(s_http, "Accept", "application/json");
         // Headers and the POST body PERSIST on a reused handle: clear both
@@ -199,7 +205,7 @@ bool dial_oauth_discover(oauth_disc_t *out)
     memset(out, 0, sizeof(*out));
     char *body = NULL;
     int st = http_do(MCP_ORIGIN "/.well-known/oauth-authorization-server",
-                     HTTP_METHOD_GET, NULL, NULL, &body);
+                     HTTP_METHOD_GET, NULL, NULL, &body, 15000);
     if (st != 200 || !body) { ESP_LOGE(TAG, "discovery HTTP %d", st); free(body); return false; }
 
     cJSON *as = cJSON_Parse(body);
@@ -214,7 +220,7 @@ bool dial_oauth_discover(oauth_disc_t *out)
     // Protected-resource metadata → resource (RFC 8707). Fallback to origin.
     strncpy(out->resource, MCP_ORIGIN, sizeof(out->resource) - 1);
     body = NULL;
-    st = http_do(MCP_ORIGIN "/.well-known/oauth-protected-resource/", HTTP_METHOD_GET, NULL, NULL, &body);
+    st = http_do(MCP_ORIGIN "/.well-known/oauth-protected-resource/", HTTP_METHOD_GET, NULL, NULL, &body, 15000);
     if (st == 200 && body) {
         cJSON *prm = cJSON_Parse(body);
         if (prm) { json_get_str(prm, "resource", out->resource, sizeof(out->resource)); cJSON_Delete(prm); }
@@ -271,7 +277,7 @@ bool dial_oauth_ensure_client(const oauth_disc_t *disc, const char *redirect_uri
 
     char *body = NULL;
     int st = http_do(disc->registration_endpoint, HTTP_METHOD_POST,
-                     "application/json", reqstr, &body);
+                     "application/json", reqstr, &body, 15000);
     free(reqstr);
     if ((st != 200 && st != 201) || !body) {
         ESP_LOGE(TAG, "DCR HTTP %d: %s", st, body ? body : "(no body)");
@@ -314,6 +320,20 @@ void dial_oauth_forget(void)
     if (nvs_open(NVS_NS, NVS_READWRITE, &h) != ESP_OK) return;
     nvs_erase_key(h, "access");
     nvs_erase_key(h, "refresh");
+    // Also drop the DCR client_id AND its cached redirect_uri. The redirect is
+    // now one fleet-wide constant (the relay's /cb), but a device that first
+    // linked on PRE-RELAY firmware still has the old on-LAN redirect
+    // (http://orion-dial-xxxx.local/callback) cached here, and
+    // dial_oauth_cached_redirect() would hand it back on the next boot — so the
+    // re-link QR would carry that dead .local redirect, the phone's approval
+    // would be sent to a callback server that no longer exists, and the relay
+    // poll would wait forever. Erasing both makes the next boot re-register a
+    // fresh client against the relay redirect and re-consent once. Safe: forget()
+    // means "fully unlink" (the refresh token is already gone above, so the old
+    // client holds nothing), and a healthy device that is still refreshing never
+    // calls this, so it is never dragged through a needless re-registration.
+    nvs_erase_key(h, "client_id");
+    nvs_erase_key(h, "redirect_uri");
     nvs_commit(h);
     nvs_close(h);
 }
@@ -371,22 +391,6 @@ static void url_encode(const char *in, char *out, size_t out_sz)
     out[o] = 0;
 }
 
-// Decode a query-string value in place (httpd does NOT url-decode; %XX + '+').
-static void url_decode(char *s)
-{
-    char *o = s;
-    for (char *i = s; *i; i++) {
-        if (*i == '+') { *o++ = ' '; }
-        else if (*i == '%' && i[1] && i[2]) {
-            int hi = i[1], lo = i[2];
-            hi = hi <= '9' ? hi - '0' : (hi | 0x20) - 'a' + 10;
-            lo = lo <= '9' ? lo - '0' : (lo | 0x20) - 'a' + 10;
-            *o++ = (char)((hi << 4) | lo); i += 2;
-        } else { *o++ = *i; }
-    }
-    *o = 0;
-}
-
 /* ---- token exchange (shared by authorize + refresh) ------------------ */
 
 static char s_token_err[192];   // last token-endpoint error, for on-screen display
@@ -411,7 +415,7 @@ static bool token_request(const char *token_endpoint, const char *body)
 {
     char *resp = NULL;
     int st = http_do(token_endpoint, HTTP_METHOD_POST,
-                     "application/x-www-form-urlencoded", body, &resp);
+                     "application/x-www-form-urlencoded", body, &resp, 15000);
     if (st != 200 || !resp) {
         ESP_LOGE(TAG, "token HTTP %d: %s", st, resp ? resp : "(no body)");
         if (st <= 0)
@@ -461,53 +465,12 @@ bool dial_oauth_refresh(const oauth_disc_t *disc, const char *client_id)
     return ok;
 }
 
-/* ---- interactive authorize: PKCE state + callback server ------------- */
+/* ---- interactive authorize: PKCE state + relay poll ------------------ */
 
 static char s_verifier[80];
 static char s_state[32];
 static char s_code[1024];   // Orion auth codes can be long; avoid truncation
 static volatile bool s_got_code;
-static httpd_handle_t s_cb_httpd;
-
-// Static scratch so the HTTP server task's stack stays small (large on-stack
-// buffers here overflow the httpd task and reboot the board). s_code doubles as
-// the captured-code buffer.
-static char s_cb_query[1600];
-static char s_cb_state[64];
-
-static esp_err_t cb_handler(httpd_req_t *req)
-{
-    s_cb_query[0] = 0;
-    httpd_req_get_url_query_str(req, s_cb_query, sizeof(s_cb_query));
-    s_code[0] = s_cb_state[0] = 0;
-    httpd_query_key_value(s_cb_query, "code", s_code, sizeof(s_code));
-    httpd_query_key_value(s_cb_query, "state", s_cb_state, sizeof(s_cb_state));
-    // httpd does not URL-decode query values; decode so the token request
-    // re-encodes exactly once (double-encoding => "invalid code format").
-    url_decode(s_code);
-    url_decode(s_cb_state);
-    bool match = (s_code[0] && strcmp(s_cb_state, s_state) == 0);
-    ESP_LOGI(TAG, "callback hit: code=%s state_match=%d", s_code[0] ? "yes" : "no", match);
-
-    httpd_resp_set_type(req, "text/html; charset=UTF-8");
-    if (match) {
-        httpd_resp_sendstr(req,
-            "<!doctype html><meta charset=utf-8><meta name=viewport content='width=device-width,initial-scale=1'>"
-            "<body style='font-family:sans-serif;text-align:center;margin-top:40px'>"
-            "<h2 style='color:#0b6'>Dial authorized \xE2\x9C\x93</h2>"
-            "<p>You can close this page and return to the dial.</p></body>");
-        // Raised only once the page is on its way out. The worker treats this
-        // flag as "the server has done its job" and shuts it down immediately
-        // to get the sockets back for the token exchange, so setting it any
-        // earlier would race that teardown against this reply and show the
-        // phone a connection error instead of the tick.
-        s_got_code = true;   // s_code already holds the code
-    } else {
-        httpd_resp_set_status(req, "400 Bad Request");
-        httpd_resp_sendstr(req, "authorization failed (state mismatch or no code)");
-    }
-    return ESP_OK;
-}
 
 bool dial_oauth_start_authorize(const oauth_disc_t *disc, const char *client_id,
                                 const char *redirect_uri, char *url_out, size_t url_sz)
@@ -515,6 +478,10 @@ bool dial_oauth_start_authorize(const oauth_disc_t *disc, const char *client_id,
     char challenge[64];
     dial_oauth_pkce(s_verifier, sizeof(s_verifier), challenge, sizeof(challenge));
 
+    // state is both the OAuth CSRF/binding value the code is checked against
+    // AND the relay mailbox key the phone's /cb write and the dial's /poll read
+    // agree on, so it must be unguessable — a bearer secret. 16 random bytes ->
+    // 128-bit, base64url.
     uint8_t rnd[16];
     esp_fill_random(rnd, sizeof(rnd));
     base64url(rnd, sizeof(rnd), s_state, sizeof(s_state));
@@ -530,16 +497,54 @@ bool dial_oauth_start_authorize(const oauth_disc_t *disc, const char *client_id,
              "&code_challenge=%s&code_challenge_method=S256&resource=%s",
              disc->authorization_endpoint, client_id, eredir, escope, s_state, challenge, eres);
 
-    // Callback server on the LAN redirect (port 80, path /callback).
-    httpd_config_t hc = HTTPD_DEFAULT_CONFIG();
-    hc.server_port = 80;
-    hc.stack_size = 8192;   // default (~4K) overflows parsing the callback query
-    hc.lru_purge_enable = true;
-    if (httpd_start(&s_cb_httpd, &hc) != ESP_OK) { ESP_LOGE(TAG, "callback httpd failed"); return false; }
-    httpd_uri_t cb = { .uri = "/callback", .method = HTTP_GET, .handler = cb_handler };
-    httpd_register_uri_handler(s_cb_httpd, &cb);
-    ESP_LOGI(TAG, "callback server up on %s", redirect_uri);
+    // No on-device server: the phone's approval is redirected to the hosted
+    // relay's /cb (redirect_uri above), which stashes the code keyed by state.
+    // The dial collects it with dial_oauth_poll_relay_once (outbound HTTPS) —
+    // the whole port-80 httpd/socket-exhaustion path is gone. Only PKCE state
+    // is recorded here; nothing is opened to listen.
+    ESP_LOGI(TAG, "authorize URL built; code arrives via relay poll (%s)", redirect_uri);
     return true;
+}
+
+dial_relay_poll_t dial_oauth_poll_relay_once(const oauth_disc_t *disc)
+{
+    (void)disc;   // relay host is a fixed constant, not one of disc's endpoints
+    if (s_got_code) return DIAL_RELAY_GOT;   // already captured; nothing to fetch
+
+    // GET <RELAY>/poll?state=… : {"code":"…"} once the phone's redirect has
+    // deposited the code (single-use — the relay deletes on read), otherwise
+    // {"status":"pending"}. state fits s_state (base64url of 16 bytes) and the
+    // relay origin is a compile constant, so 256 bytes is ample.
+    char url[256];
+    snprintf(url, sizeof(url), ORION_DIAL_RELAY_BASE "/poll?state=%s", s_state);
+
+    // A SHORT timeout (vs the 15s the token/discovery legs use): this runs
+    // inside the consent loop's slice, and the worker task is the only one that
+    // services Settings' Re-link / Change-network / Factory-reset — a poll that
+    // blocked for 15s on a slow/unreachable relay would make those feel dead.
+    char *body = NULL;
+    int st = http_do(url, HTTP_METHOD_GET, NULL, NULL, &body, 5000);
+    if (st != 200 || !body) {
+        ESP_LOGD(TAG, "relay poll HTTP %d", st);   // transient; the worker keeps slicing
+        free(body);
+        return DIAL_RELAY_ERROR;
+    }
+
+    cJSON *j = cJSON_Parse(body);
+    free(body);
+    if (!j) return DIAL_RELAY_ERROR;
+    // json_get_str truncates to fit (strict bounds) and leaves s_code untouched
+    // when "code" is absent, so a pending response never clobbers a code we may
+    // already hold. The relay returns the code raw (not percent-encoded), so no
+    // decode step — finish_authorize url-encodes it exactly once for the token
+    // request (double-encoding => "invalid code format").
+    bool got = json_get_str(j, "code", s_code, sizeof(s_code)) && s_code[0];
+    cJSON_Delete(j);
+    if (!got) return DIAL_RELAY_PENDING;
+
+    s_got_code = true;   // s_code holds the code; finish_authorize reads it + s_verifier
+    ESP_LOGI(TAG, "relay delivered auth code (%d bytes)", (int)strlen(s_code));
+    return DIAL_RELAY_GOT;
 }
 
 bool dial_oauth_finish_authorize(const oauth_disc_t *disc, const char *client_id,
@@ -577,7 +582,11 @@ bool dial_oauth_have_code(void) { return s_got_code; }
 
 void dial_oauth_stop_authorize(void)
 {
-    if (s_cb_httpd) { httpd_stop(s_cb_httpd); s_cb_httpd = NULL; }
+    // No callback server to tear down any more (the relay poll replaced the
+    // on-LAN httpd). Retire the spent mailbox key so a stale state can't be
+    // polled again; the captured code and PKCE verifier are deliberately left
+    // intact for the finish_authorize that follows this call.
+    s_state[0] = 0;
 }
 
 const char *dial_oauth_last_error(void) { return s_token_err; }

@@ -71,7 +71,10 @@ board bring-up notes, and firmware architecture live in
 - **Scan-and-approve Orion pairing** — a QR code opens Orion's consent page
   in your phone's browser; the dial registers itself as an OAuth client on
   the spot (Dynamic Client Registration) — no shared secret baked into the
-  firmware.
+  firmware. The approval comes back through a hosted relay the dial polls, so
+  pairing works even if your phone is on cellular or a different Wi-Fi network
+  than the dial — no local reachability required. How and why it works this way
+  is written up in [docs/linking-relay.md](docs/linking-relay.md).
 - **Dual-zone control** with a side picker, so one dial can drive either
   half of the bed — plus screen rotation, so the same board reads right
   from either nightstand.

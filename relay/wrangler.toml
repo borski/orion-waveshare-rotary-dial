@@ -1,0 +1,27 @@
+# Orion Dial link relay — Cloudflare Worker + Durable Object.
+#
+# Deploy runbook, and the two firmware constants to set afterward, are in
+# relay/README.md.
+
+name = "orion-dial-relay"
+main = "src/index.ts"
+
+# Pinned, not Date.now(): the relay must never behave differently because of the
+# day it was deployed. Bump deliberately, never automatically.
+compatibility_date = "2024-11-01"
+
+# The mailbox: one Durable Object per `state`, reached via idFromName(state).
+[[durable_objects.bindings]]
+name = "MAILBOX"
+class_name = "Mailbox"
+
+# SQLite-backed DO class. `new_sqlite_classes` (not `new_classes`) is what makes
+# the object storable on the free Workers plan.
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["Mailbox"]
+
+# Observability (Workers Logs) is deliberately left OFF: it records the request
+# URL, and `code`/`state` travel in the query string (/cb, /poll), so enabling
+# it would write those secrets to a retained log store — breaking the relay's
+# "never logs a code or state value" guarantee.

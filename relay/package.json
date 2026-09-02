@@ -1,0 +1,20 @@
+{
+  "name": "orion-dial-relay",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Hosted PKCE code-relay (mailbox) that lets the Orion bedside dial finish OAuth linking outbound-only. See relay/README.md.",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@cloudflare/vitest-pool-workers": "^0.8.19",
+    "@cloudflare/workers-types": "^4.20250417.0",
+    "typescript": "^5.6.3",
+    "vitest": "~3.1.0",
+    "wrangler": "4.12.1"
+  }
+}
