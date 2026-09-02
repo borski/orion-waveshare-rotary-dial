@@ -156,12 +156,20 @@ cellular, on guest and client-isolated Wi-Fi, and through weak/roamed signal —
 anywhere the dial has working internet. It also retires the whole on-device
 port-80 HTTP server and its mDNS name, which existed only for this callback.
 
-**Does not fix:** the **~weekly re-link prompt**. That is a *server-side*
-property — Orion's refresh tokens have a limited TTL, so the dial periodically
-has to send you through consent again no matter how the code gets delivered.
-The relay makes each of those re-links **reliable and inbound-free**; it does
-**not** make them less frequent. If you're chasing "why do I have to sign in
-every week", this isn't it — that lives with Orion's token lifetime.
+**Does not address:** the **~weekly re-link prompt**. This change is about *how*
+a re-link completes, not *how often* one is triggered — the relay makes each
+re-link **reliable and inbound-free**, but does not make them less frequent.
+
+We have **not** root-caused the weekly cadence. The leading hypothesis is a
+server-side refresh-token lifetime at Orion (the dial's refresh path itself is
+healthy — we captured a clean token rotation), but a firmware-side cause is not
+ruled out: e.g. a refresh-token **rotation-reuse** race, where the dial replays a
+stale refresh token after a reboot and Orion invalidates the whole family in
+response. Both present identically to a user (periodic re-consent) and to a
+naive log (a periodic `invalid_grant`); telling them apart needs a real failure
+captured with the refresh-token fingerprint, over a ~week-long window. We have
+not yet caught one — the only capture to date spanned ~13 hours. Until we do,
+treat the cause as **unconfirmed**.
 
 ### Rollout
 

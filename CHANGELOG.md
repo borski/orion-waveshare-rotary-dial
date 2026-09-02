@@ -38,8 +38,8 @@ Releases marked **(beta)** were prereleases, visible only to dials with
   now cleanly switches such a dial over to the new flow.
 
 > This makes each sign-in reliable and network-independent. It does **not**
-> change how *often* Orion asks you to sign in — that interval is set by Orion's
-> service, not the dial.
+> change how *often* you're asked to sign in — and we haven't yet root-caused
+> that ~weekly cadence, so it may not go away with this update.
 
 ## 1.5.0-beta.1 — 2026-08-31 (beta)
 
