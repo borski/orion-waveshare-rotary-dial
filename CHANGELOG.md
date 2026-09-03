@@ -12,6 +12,50 @@ section in the same commit that bumps `PROJECT_VER`.
 Releases marked **(beta)** were prereleases, visible only to dials with
 "Beta builds" turned on.
 
+## 1.5.0 — 2026-09-02
+
+The 1.5.0 stable release, rolling up the 1.5.0 betas. Much of it is the work of
+Phil Topness (@topness-msft), landed with thanks.
+
+### Added
+
+- **Rail-push Boost.** From the dial face, keep turning the knob past the cold
+  (or hot) end of the arc and hold for a moment: the dial arms, buzzes, and
+  starts a Boost — no need to open the Boost screen first. Turn firmly the other
+  way to cancel a running one. The Boost length you last chose is remembered.
+- **A segmented level ring on the relative scale.** The relative (−10…+10) face
+  reads as 21 discrete steps along a cool-to-warm ramp, with the current level
+  lit and a thin mark showing where the bed's actual water temperature sits.
+- **Tap to switch scales** between the absolute (temperature) and relative
+  (−10…+10) faces.
+
+### Changed
+
+- **Linking works from any network now — even cellular.** Pairing used to need
+  your phone on the *same* Wi-Fi as the dial: the approval on Orion's site
+  redirected back to an address only reachable on your home network, so a phone
+  on cellular data, a guest network, or a network that isolates devices would
+  just spin forever with nothing on the dial saying why. Approval now comes back
+  over the internet instead, so it completes wherever your phone is. The dial no
+  longer runs a web server during setup at all — which also retires a class of
+  pairing failure where that server ran the dial out of network connections.
+- **A quieter off-state.** A side that's turned off settles into a calmer face
+  instead of holding a bright, active look.
+
+### Fixed
+
+- **Linking dead-ends and setup traps.** Setup no longer strands you on a screen
+  with no way forward, and a re-link started from the link screen no longer
+  crashes on the way back.
+- **Re-link no longer gets stuck on some upgraded dials.** A dial paired on an
+  older version could, after updating, keep trying to finish a re-link against
+  the old same-network address and never complete. It now cleanly switches over.
+- **The schedule loads correctly at boot.**
+
+> Linking is now reliable and network-independent. It does **not** change how
+> *often* you're asked to sign in — we haven't yet root-caused that ~weekly
+> cadence, so it may not go away with this update.
+
 ## 1.5.0-beta.2 — 2026-09-02 (beta)
 
 ### Changed
