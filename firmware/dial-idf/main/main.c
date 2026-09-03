@@ -344,8 +344,12 @@ static screen_id_t nav_policy(const app_state_t *st, void **arg)
             // was already here) — it's the one sub-screen where getting
             // yanked away mid-check/mid-confirm by a routine poll commit
             // would be user-visibly broken, not just an inconvenience.
+            // DIAG belongs here for the same reason ABOUT does: it is a
+            // read-only face someone swipes to and can fall asleep on, and a
+            // routine poll commit must not yank them off it mid-read.
             bool passive = cur == SCR_MENU ||
-                           cur == SCR_WIFI || cur == SCR_ABOUT || cur == SCR_UPDATE;
+                           cur == SCR_WIFI || cur == SCR_ABOUT || cur == SCR_UPDATE ||
+                           cur == SCR_DIAG;
             if (passive && dial_power_level() == DPWR_STANDBY) {
                 *arg = (void *)(uintptr_t)st->ui_zone;
                 return SCR_STANDBY;
